@@ -203,6 +203,163 @@
 
     const isSunday = (d = new Date()) => d.getDay() === 0;
 
+    // ── Sound Manager (Web Audio API) ───────────────────────────────────────
+    // Lädt sounds/maeh.mp3 + sounds/melody.mp3 falls vorhanden, sonst
+    // synthetisierter Fallback. So funktioniert Ton sofort ohne Asset-Dateien.
+    const SoundManager = (() => {
+      let ctx = null;
+      let maehBuffer = null;
+      let maehTried = false;
+      let enabled = true;
+
+      // Melodie
+      let melodyAudio = null;     // <audio>-Element für melody.mp3
+      let melodyMp3Failed = false;
+      let synthTimer = null;      // Fallback-Jingle-Interval
+
+      const ensureCtx = () => {
+        if (!ctx) {
+          try { ctx = new (window.AudioContext || window.webkitAudioContext)(); }
+          catch { ctx = null; }
+        }
+        if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {});
+        return ctx;
+      };
+
+      // Beim ersten User-Gesture aufrufen (entsperrt Autoplay + lädt Sample)
+      const unlock = () => { ensureCtx(); loadMaeh(); };
+
+      const loadMaeh = async () => {
+        if (maehTried) return;
+        const c = ctx;            // nur laden wenn Context bereits durch Gesture existiert
+        if (!c) return;
+        maehTried = true;
+        try {
+          const res = await fetch('./sounds/maeh.mp3');
+          if (res.ok) {
+            const arr = await res.arrayBuffer();
+            maehBuffer = await c.decodeAudioData(arr);
+          }
+        } catch { /* Fallback auf Synthese */ }
+      };
+
+      // Synthetisiertes „Mäh" (zittriger Bleat)
+      const synthMaeh = (pitch = 1) => {
+        const c = ensureCtx(); if (!c) return;
+        const now = c.currentTime;
+        const osc = c.createOscillator();
+        const gain = c.createGain();
+        const filter = c.createBiquadFilter();
+        osc.type = 'sawtooth';
+        const base = 320 * pitch;
+        osc.frequency.setValueAtTime(base, now);
+        osc.frequency.setValueAtTime(base * 1.12, now + 0.08);
+        osc.frequency.setValueAtTime(base * 0.94, now + 0.16);
+        osc.frequency.setValueAtTime(base * 1.06, now + 0.24);
+        osc.frequency.linearRampToValueAtTime(base * 0.78, now + 0.42);
+        filter.type = 'lowpass';
+        filter.frequency.value = 1500;
+        gain.gain.setValueAtTime(0.0001, now);
+        gain.gain.exponentialRampToValueAtTime(0.16, now + 0.04);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.46);
+        osc.connect(filter); filter.connect(gain); gain.connect(c.destination);
+        osc.start(now); osc.stop(now + 0.5);
+      };
+
+      const playMaeh = (pitch = 1) => {
+        if (!enabled) return;
+        const c = ensureCtx(); if (!c) return;
+        if (maehBuffer) {
+          const src = c.createBufferSource();
+          const gain = c.createGain();
+          src.buffer = maehBuffer;
+          src.playbackRate.value = pitch;
+          gain.gain.value = 0.7;
+          src.connect(gain); gain.connect(c.destination);
+          src.start();
+        } else {
+          synthMaeh(pitch);
+        }
+      };
+
+      // Fröhlicher synthetisierter Jingle-Loop (Fallback für melody.mp3)
+      const startSynthMelody = () => {
+        if (synthTimer) return;
+        const c = ensureCtx(); if (!c) return;
+        const notes = [523.25, 587.33, 659.25, 784.00, 659.25, 587.33, 659.25, 880.00];
+        let i = 0;
+        const playNote = () => {
+          if (!enabled) return;
+          const now = c.currentTime;
+          const osc = c.createOscillator();
+          const gain = c.createGain();
+          osc.type = 'triangle';
+          osc.frequency.value = notes[i % notes.length];
+          gain.gain.setValueAtTime(0.0001, now);
+          gain.gain.exponentialRampToValueAtTime(0.07, now + 0.03);
+          gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.32);
+          osc.connect(gain); gain.connect(c.destination);
+          osc.start(now); osc.stop(now + 0.34);
+          i++;
+        };
+        playNote();
+        synthTimer = setInterval(playNote, 360);
+      };
+
+      const stopSynthMelody = () => {
+        if (synthTimer) { clearInterval(synthTimer); synthTimer = null; }
+      };
+
+      const startMelody = () => {
+        if (!enabled) return;
+        if (melodyMp3Failed) { startSynthMelody(); return; }
+        if (!melodyAudio) {
+          melodyAudio = new Audio('./sounds/melody.mp3');
+          melodyAudio.loop = true;
+          melodyAudio.volume = 0.4;
+          melodyAudio.addEventListener('error', () => {
+            melodyMp3Failed = true;
+            melodyAudio = null;
+            if (enabled) startSynthMelody();
+          }, { once: true });
+        }
+        melodyAudio.play().catch(() => {
+          melodyMp3Failed = true;
+          melodyAudio = null;
+          startSynthMelody();
+        });
+      };
+
+      const stopMelody = () => {
+        stopSynthMelody();
+        if (melodyAudio) { try { melodyAudio.pause(); melodyAudio.currentTime = 0; } catch {} }
+      };
+
+      const setEnabled = (v) => {
+        enabled = v;
+        if (!v) stopMelody();
+      };
+
+      return { unlock, loadMaeh, playMaeh, startMelody, stopMelody, setEnabled };
+    })();
+
+    // Hook: zufälliges „Mäh"-Chorus während ein Screen aktiv ist
+    const useChorus = (active, dep) => {
+      useEffect(() => {
+        if (!active) return;
+        let timer;
+        const schedule = () => {
+          const delay = 1500 + Math.random() * 3200;
+          timer = setTimeout(() => {
+            SoundManager.playMaeh(0.8 + Math.random() * 0.8); // 0.8×–1.6×
+            schedule();
+          }, delay);
+        };
+        schedule();
+        return () => clearTimeout(timer);
+      }, [active, dep]);
+    };
+
     // ── Default Data ────────────────────────────────────────────────────────
     const DEFAULT_DATA = () => ({
       schemaVersion: 1,
@@ -648,6 +805,16 @@
     // ── Reward Screen ───────────────────────────────────────────────────────
     const RewardScreen = ({ streak, onContinue }) => {
       const count = Math.min(streak.current, 5);
+
+      useEffect(() => {
+        // Neues Schaf hüpft auf die Wiese → fröhliches „Mäh" beim Landen
+        const t = setTimeout(() => SoundManager.playMaeh(1.0), 350);
+        SoundManager.startMelody();
+        return () => { clearTimeout(t); SoundManager.stopMelody(); };
+      }, []);
+
+      useChorus(true, count);
+
       return (
         <div className="flex flex-col items-center justify-center px-6 text-center bg-green-50" style={{ minHeight: '100dvh' }}>
           <div className="flex justify-center gap-3 mb-4 flex-wrap">
@@ -681,6 +848,10 @@
     const StreakBrokenScreen = ({ onContinue }) => {
       const [phase, setPhase] = useState('escape'); // 'escape' | 'repair'
       useEffect(() => {
+        // Panische Schafe büxen aus – Mähs in absteigender Tonhöhe
+        [0, 1, 2].forEach(i =>
+          setTimeout(() => SoundManager.playMaeh(1.5 - i * 0.25), i * 260)
+        );
         const t = setTimeout(() => setPhase('repair'), 1800);
         return () => clearTimeout(t);
       }, []);
@@ -717,6 +888,14 @@
     // ── Meadow Screen (Phase-2-Platzhalter) ─────────────────────────────────
     const MeadowScreen = ({ streak, onBack }) => {
       const visible = Math.min(streak.current, 12);
+
+      useEffect(() => {
+        SoundManager.startMelody();
+        return () => SoundManager.stopMelody();
+      }, []);
+
+      useChorus(visible > 0, visible);
+
       return (
         <div className="flex flex-col bg-green-100" style={{ minHeight: '100dvh' }}>
           <div className="bg-white px-4 py-4 shadow-sm flex items-center gap-3 flex-none">
@@ -752,7 +931,7 @@
               </>
             )}
             <p className="text-xs text-gray-400 mt-4 bg-white rounded-2xl px-4 py-2 shadow-sm">
-              🌱 Die interaktive Wiese mit Drag & Zoom kommt in Phase 2
+              🌱 Die interaktive Wiese mit Drag & Zoom kommt in Phase 5
             </p>
           </div>
         </div>
@@ -989,6 +1168,19 @@
     function App() {
       const [screen, setScreen] = useState('loading');
       const [data,   setData]   = useState(null);
+
+      // Audio erst bei erster Interaktion entsperren (Browser-Autoplay-Policy).
+      // Kein eager AudioContext beim Mount – sonst „suspended"-Warnung.
+      useEffect(() => {
+        const unlock = () => SoundManager.unlock();
+        window.addEventListener('pointerdown', unlock, { once: true });
+        return () => window.removeEventListener('pointerdown', unlock);
+      }, []);
+
+      // Sound-Einstellung übernehmen
+      useEffect(() => {
+        if (data) SoundManager.setEnabled(data.settings.soundEnabled);
+      }, [data && data.settings.soundEnabled]);
 
       useEffect(() => {
         loadData().then(d => {
