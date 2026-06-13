@@ -1,0 +1,1118 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>SheepCare</title>
+  <meta name="theme-color" content="#16a34a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="SheepCare">
+  <link rel="manifest" href="./manifest.json">
+  <link rel="apple-touch-icon" href="./icon-192.png">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.25.6/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/idb-keyval@6/dist/umd.js"></script>
+
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js'));
+    }
+  </script>
+
+  <style>
+    * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
+    html, body, #root { height: 100%; }
+    body { margin: 0; background: #f0fdf4; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+
+    @keyframes bounceIn {
+      0%   { transform: scale(0.3) translateY(-40px); opacity: 0; }
+      60%  { transform: scale(1.15) translateY(0);    opacity: 1; }
+      100% { transform: scale(1)    translateY(0);    opacity: 1; }
+    }
+    @keyframes float {
+      0%, 100% { transform: translateY(0px); }
+      50%       { transform: translateY(-8px); }
+    }
+    @keyframes wiggle {
+      0%, 100% { transform: rotate(-5deg); }
+      50%       { transform: rotate(5deg); }
+    }
+    @keyframes slideUp {
+      from { transform: translateY(16px); opacity: 0; }
+      to   { transform: translateY(0);    opacity: 1; }
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to   { opacity: 1; }
+    }
+    @keyframes runOff {
+      0%   { transform: translateX(0); opacity: 1; }
+      100% { transform: translateX(120vw); opacity: 0; }
+    }
+
+    .anim-bounceIn  { animation: bounceIn 0.6s cubic-bezier(.36,.07,.19,.97); }
+    .anim-float     { animation: float 3s ease-in-out infinite; }
+    .anim-wiggle    { animation: wiggle 0.8s ease-in-out infinite; }
+    .anim-slideUp   { animation: slideUp 0.35s ease-out; }
+    .anim-fadeIn    { animation: fadeIn 0.4s ease; }
+    .anim-runOff    { animation: runOff 1.2s ease-in forwards; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" data-presets="react">
+    const { useState, useEffect, useRef, useCallback } = React;
+    const idbGet = idbKeyval.get;
+    const idbSet = idbKeyval.set;
+
+    // ── Schema & Constants ──────────────────────────────────────────────────
+    const APP_SCHEMA_VERSION = 1;
+    const DB_KEY = 'sheepcare-v1';
+
+    const SCALE_OPTIONS = [
+      { value: 100, label: 'Ja, die ganze Zeit',         emoji: '🌟' },
+      { value: 75,  label: 'Ja, größten Teils',          emoji: '😊' },
+      { value: 50,  label: 'Naja, nur so halb-halb',     emoji: '😐' },
+      { value: 25,  label: 'Nein, größten Teils nicht',  emoji: '😕' },
+      { value: 0,   label: 'Nein, so gar nicht/kaum',    emoji: '😔' },
+    ];
+
+    // Fragenkatalog – reihenfolgetreu, Konditionalfragen mit condition()
+    const QUESTIONS = [
+      {
+        id: 'q_lieb_zu_mir',
+        type: 'scale',
+        text: 'War ich heute lieb zu mir?',
+      },
+      {
+        id: 'q_spiegel',
+        type: 'bool',
+        text: 'Habe ich mich heute im Spiegel angelächelt?',
+      },
+      {
+        id: 'q_geduldig_mit_mir',
+        type: 'scale',
+        text: 'War ich heute geduldig mit mir?',
+      },
+      {
+        id: 'q_geduldig_mit_anderen',
+        type: 'scale',
+        text: 'War ich geduldig mit anderen?',
+      },
+      {
+        id: 'q_stress',
+        type: 'scale',
+        text: 'Habe ich mich heute nicht gestresst und meinen Zeitplan realistisch einschätzen können?',
+      },
+      {
+        id: 'q_mahlzeiten',
+        type: 'scale',
+        text: 'Habe ich auf ausgewogene & kleine Mahlzeiten geachtet?',
+      },
+      {
+        id: 'q_welche_mahlzeit',
+        type: 'text',
+        text: 'Bei welche(n) Mahlzeit(en) nicht?',
+        isFollowUp: true,
+        condition: (ans) => (ans.q_mahlzeiten?.value ?? 100) <= 50,
+      },
+      {
+        id: 'q_zeit_fuer_mich',
+        type: 'bool',
+        text: 'Habe ich mir heute Zeit für mich genommen?',
+      },
+      {
+        id: 'q_wie_viel',
+        type: 'duration',
+        text: 'Wie viel Zeit habe ich mir genommen?',
+        isFollowUp: true,
+        condition: (ans) => ans.q_zeit_fuer_mich?.value === true,
+      },
+      {
+        id: 'q_fuer_was',
+        type: 'text',
+        text: 'Für was habe ich mir die Zeit genommen?',
+        isFollowUp: true,
+        condition: (ans) => ans.q_zeit_fuer_mich?.value === true,
+      },
+      {
+        id: 'q_warum_nicht',
+        type: 'text',
+        text: '⚠️ Warum nicht? Nenne deine Ausreden (Gründe)!',
+        isFollowUp: true,
+        condition: (ans) => ans.q_zeit_fuer_mich?.value === false,
+      },
+      {
+        id: 'q_freude',
+        type: 'text',
+        text: 'Was hat mir heute wirklich Freude gemacht? Bzw. wann konnte ich wirklich lachen?',
+      },
+      {
+        id: 'q_stolz',
+        type: 'text',
+        text: 'Worauf bin ich heute stolz?',
+      },
+      // Sonntag-Fragen
+      {
+        id: 'q_sonntag_entscheidung',
+        type: 'text',
+        text: 'Was habe ich diese Woche (für die Familie) ohne Hilfe und ohne Einforderung von Meinung entschieden?',
+        sundayOnly: true,
+      },
+      {
+        id: 'q_waage',
+        type: 'bool',
+        text: 'Habe ich mich mindestens 3× diese Woche auf die Waage gestellt?',
+        sundayOnly: true,
+      },
+      {
+        id: 'q_trennung',
+        type: 'bool',
+        text: 'Konnte ich mich diese Woche von etwas trennen?',
+        sundayOnly: true,
+      },
+      {
+        id: 'q_trennung_was',
+        type: 'text',
+        text: 'Von was?',
+        isFollowUp: true,
+        sundayOnly: true,
+        condition: (ans) => ans.q_trennung?.value === true,
+      },
+    ];
+
+    // ── Date Helpers ────────────────────────────────────────────────────────
+    const dateKey = (d = new Date()) => {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    };
+
+    const parseKey = (key) => new Date(key + 'T12:00:00');
+
+    const daysBetween = (keyA, keyB) => {
+      const msPerDay = 1000 * 60 * 60 * 24;
+      return Math.round(Math.abs(parseKey(keyB) - parseKey(keyA)) / msPerDay);
+    };
+
+    const isSunday = (d = new Date()) => d.getDay() === 0;
+
+    // ── Default Data ────────────────────────────────────────────────────────
+    const DEFAULT_DATA = () => ({
+      schemaVersion: 1,
+      entries: {},
+      streak: { current: 0, best: 0, lastCompletedDate: null },
+      settings: {
+        soundEnabled: true,
+        push20Enabled: true,
+        push23Enabled: true,
+        push20Time: '20:00',
+        push23Time: '23:00',
+        apiKey: '',
+      },
+    });
+
+    // ── Migration Engine ────────────────────────────────────────────────────
+    const migrateData = (raw) => {
+      if (!raw) return DEFAULT_DATA();
+
+      const data = {
+        schemaVersion: raw.schemaVersion || 1,
+        entries:  raw.entries  || {},
+        streak:   { ...DEFAULT_DATA().streak,   ...(raw.streak   || {}) },
+        settings: { ...DEFAULT_DATA().settings, ...(raw.settings || {}) },
+      };
+
+      // Ensure all question keys exist in every entry (null = not in this schema version)
+      const allIds = QUESTIONS.map(q => q.id);
+      Object.values(data.entries).forEach(entry => {
+        if (!entry.answers) entry.answers = {};
+        allIds.forEach(id => {
+          if (!(id in entry.answers)) entry.answers[id] = null;
+        });
+      });
+
+      return data;
+    };
+
+    // ── DB Layer ────────────────────────────────────────────────────────────
+    const loadData = async () => {
+      try {
+        const raw = await idbGet(DB_KEY);
+        return migrateData(raw || null);
+      } catch {
+        return DEFAULT_DATA();
+      }
+    };
+
+    const saveData = async (data) => {
+      try {
+        await idbSet(DB_KEY, data);
+      } catch (e) {
+        console.error('Speichern fehlgeschlagen', e);
+      }
+    };
+
+    // ── Streak Logic ────────────────────────────────────────────────────────
+    // Returns: 'start' | 'active' | 'done' | 'broken'
+    const streakStatus = (streak) => {
+      if (!streak.lastCompletedDate) return 'start';
+      const today = dateKey();
+      if (streak.lastCompletedDate === today) return 'done';
+      const diff = daysBetween(streak.lastCompletedDate, today);
+      return diff === 1 ? 'active' : 'broken';
+    };
+
+    // ── Active Questions (filtered for current day) ─────────────────────────
+    const getActiveSteps = (answers) => {
+      const sunday = isSunday();
+      return QUESTIONS.filter(q => {
+        if (q.sundayOnly && !sunday) return false;
+        if (q.condition && !q.condition(answers)) return false;
+        return true;
+      });
+    };
+
+    const allAnswered = (answers) => {
+      return getActiveSteps(answers).every(q => {
+        const a = answers[q.id];
+        if (a === null || a === undefined) return false;
+        if (q.type === 'text' && !String(a.value || '').trim()) return false;
+        return a.value !== null && a.value !== undefined;
+      });
+    };
+
+    // ── SVG Graphics ────────────────────────────────────────────────────────
+    const SheepSVG = ({ size = 80, className = '', style }) => (
+      <svg width={size} height={size} viewBox="0 0 100 100" className={className} style={style}>
+        {/* Body wool */}
+        <ellipse cx="48" cy="58" rx="30" ry="22" fill="#f1f5f9" stroke="#cbd5e1" strokeWidth="1.5"/>
+        {/* Wool bumps */}
+        <circle cx="34" cy="50" r="9"  fill="white" stroke="#e2e8f0" strokeWidth="1"/>
+        <circle cx="46" cy="45" r="10" fill="white" stroke="#e2e8f0" strokeWidth="1"/>
+        <circle cx="58" cy="48" r="9"  fill="white" stroke="#e2e8f0" strokeWidth="1"/>
+        <circle cx="40" cy="62" r="8"  fill="white" stroke="#e2e8f0" strokeWidth="1"/>
+        <circle cx="55" cy="63" r="7"  fill="white" stroke="#e2e8f0" strokeWidth="1"/>
+        {/* Head */}
+        <ellipse cx="75" cy="50" rx="14" ry="13" fill="#e2e8f0" stroke="#cbd5e1" strokeWidth="1.5"/>
+        <ellipse cx="81" cy="55" rx="6"  ry="7"  fill="#cbd5e1"/>
+        {/* Eyes */}
+        <circle cx="73" cy="46" r="2.5" fill="#334155"/>
+        <circle cx="80" cy="46" r="2.5" fill="#334155"/>
+        <circle cx="74" cy="45" r="0.8" fill="white"/>
+        <circle cx="81" cy="45" r="0.8" fill="white"/>
+        {/* Smile */}
+        <path d="M77 53 Q80 56 83 53" fill="none" stroke="#64748b" strokeWidth="1.2" strokeLinecap="round"/>
+        {/* Ear */}
+        <ellipse cx="65" cy="42" rx="5" ry="7" fill="#e2e8f0" stroke="#cbd5e1" strokeWidth="1" transform="rotate(-20 65 42)"/>
+        <ellipse cx="65" cy="42" rx="3" ry="4.5" fill="#fda4af" transform="rotate(-20 65 42)"/>
+        {/* Legs */}
+        <rect x="30" y="76" width="7" height="17" rx="3.5" fill="#94a3b8"/>
+        <rect x="42" y="78" width="7" height="15" rx="3.5" fill="#94a3b8"/>
+        <rect x="56" y="78" width="7" height="15" rx="3.5" fill="#94a3b8"/>
+        <rect x="67" y="76" width="7" height="17" rx="3.5" fill="#94a3b8"/>
+        {/* Hooves */}
+        <rect x="30" y="90" width="7"  height="4" rx="2" fill="#475569"/>
+        <rect x="42" y="90" width="7"  height="4" rx="2" fill="#475569"/>
+        <rect x="56" y="90" width="7"  height="4" rx="2" fill="#475569"/>
+        <rect x="67" y="90" width="7"  height="4" rx="2" fill="#475569"/>
+        {/* Tail */}
+        <circle cx="18" cy="58" r="6" fill="white" stroke="#e2e8f0" strokeWidth="1"/>
+      </svg>
+    );
+
+    const ShepherdSVG = ({ size = 130, className = '' }) => (
+      <svg width={size} height={Math.round(size * 1.4)} viewBox="0 0 100 140" className={className}>
+        {/* Fence */}
+        <rect x="62" y="55" width="6" height="70" rx="2" fill="#92400e"/>
+        <rect x="60" y="70" width="36" height="5"  rx="1.5" fill="#a16207"/>
+        <rect x="60" y="88" width="36" height="5"  rx="1.5" fill="#a16207"/>
+        <rect x="92" y="55" width="6" height="70" rx="2" fill="#92400e"/>
+        {/* Body */}
+        <rect x="32" y="82" width="28" height="44" rx="8" fill="#3b82f6"/>
+        {/* Head */}
+        <circle cx="46" cy="66" r="17" fill="#fbbf24"/>
+        {/* Hat brim */}
+        <ellipse cx="46" cy="52" rx="20" ry="4" fill="#78350f"/>
+        {/* Hat top */}
+        <rect x="35" y="36" width="22" height="18" rx="4" fill="#92400e"/>
+        {/* Eyes */}
+        <circle cx="41" cy="64" r="2.5" fill="#1c1917"/>
+        <circle cx="51" cy="64" r="2.5" fill="#1c1917"/>
+        <circle cx="42" cy="63" r="0.8" fill="white"/>
+        <circle cx="52" cy="63" r="0.8" fill="white"/>
+        {/* Determined smile – working hard */}
+        <path d="M42 71 Q46 74 50 71" fill="none" stroke="#92400e" strokeWidth="1.5" strokeLinecap="round"/>
+        {/* Left arm */}
+        <line x1="32" y1="96" x2="16" y2="110" stroke="#3b82f6" strokeWidth="9" strokeLinecap="round"/>
+        {/* Right arm + hammer */}
+        <line x1="60" y1="96" x2="74" y2="82" stroke="#3b82f6" strokeWidth="9" strokeLinecap="round"/>
+        <line x1="74" y1="82" x2="80" y2="66" stroke="#92400e" strokeWidth="4" strokeLinecap="round"/>
+        <rect x="76" y="58" width="10" height="7" rx="2" fill="#64748b"/>
+        {/* Legs */}
+        <rect x="34" y="122" width="10" height="14" rx="5" fill="#1d4ed8"/>
+        <rect x="48" y="122" width="10" height="14" rx="5" fill="#1d4ed8"/>
+        {/* Boots */}
+        <rect x="33" y="132" width="12" height="5" rx="2.5" fill="#1c1917"/>
+        <rect x="47" y="132" width="12" height="5" rx="2.5" fill="#1c1917"/>
+      </svg>
+    );
+
+    // ── UI Primitives ───────────────────────────────────────────────────────
+    const Btn = ({ children, onClick, variant = 'primary', className = '', disabled = false }) => {
+      const styles = {
+        primary:   'bg-green-600 text-white shadow active:bg-green-700',
+        secondary: 'bg-white text-green-700 border-2 border-green-300 active:bg-green-50',
+        ghost:     'bg-transparent text-green-700 active:bg-green-50',
+        warn:      'bg-amber-500 text-white shadow active:bg-amber-600',
+        danger:    'bg-red-100 text-red-700 border border-red-300',
+      };
+      return (
+        <button
+          onClick={onClick}
+          disabled={disabled}
+          className={`font-semibold rounded-2xl px-6 py-4 text-base transition-transform active:scale-95 disabled:opacity-40 ${styles[variant]} ${className}`}
+        >
+          {children}
+        </button>
+      );
+    };
+
+    const Toast = ({ msg }) => (
+      <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-green-700 text-white px-5 py-3 rounded-2xl shadow-lg text-sm font-medium anim-slideUp">
+        {msg}
+      </div>
+    );
+
+    // ── Input Components ────────────────────────────────────────────────────
+    const ScaleInput = ({ value, onChange }) => (
+      <div className="flex flex-col gap-3 w-full">
+        {SCALE_OPTIONS.map(opt => (
+          <button
+            key={opt.value}
+            onClick={() => onChange(opt.value)}
+            className={`flex items-center gap-4 w-full px-5 py-4 rounded-2xl border-2 text-left transition-all active:scale-95
+              ${value === opt.value
+                ? 'border-green-500 bg-green-50 shadow'
+                : 'border-gray-200 bg-white'}`}
+          >
+            <span className="text-2xl leading-none">{opt.emoji}</span>
+            <span className={`text-base font-medium leading-snug ${value === opt.value ? 'text-green-700' : 'text-gray-700'}`}>
+              {opt.label}
+            </span>
+            {value === opt.value && <span className="ml-auto text-green-500 font-bold">✓</span>}
+          </button>
+        ))}
+      </div>
+    );
+
+    const BoolInput = ({ value, onChange }) => (
+      <div className="flex gap-4 w-full">
+        <button
+          onClick={() => onChange(true)}
+          className={`flex-1 py-7 rounded-2xl border-2 text-xl font-bold transition-all active:scale-95
+            ${value === true ? 'border-green-500 bg-green-50 text-green-700 shadow' : 'border-gray-200 bg-white text-gray-500'}`}
+        >
+          Ja 👍
+        </button>
+        <button
+          onClick={() => onChange(false)}
+          className={`flex-1 py-7 rounded-2xl border-2 text-xl font-bold transition-all active:scale-95
+            ${value === false ? 'border-red-300 bg-red-50 text-red-600 shadow' : 'border-gray-200 bg-white text-gray-500'}`}
+        >
+          Nein 👎
+        </button>
+      </div>
+    );
+
+    const TextInput = ({ value, onChange, placeholder = 'Deine Antwort...' }) => (
+      <textarea
+        value={value || ''}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        rows={5}
+        className="w-full px-4 py-3 rounded-2xl border-2 border-gray-200 bg-white text-gray-800 text-base resize-none focus:border-green-400 focus:outline-none leading-relaxed"
+      />
+    );
+
+    const DurationInput = ({ value, onChange }) => {
+      const fmt = (h) => {
+        const hrs  = Math.floor(h);
+        const mins = Math.round((h - hrs) * 60);
+        if (hrs === 0) return `${mins} Min`;
+        if (mins === 0) return `${hrs} Std`;
+        return `${hrs}:${String(mins).padStart(2, '0')} Std`;
+      };
+      const opts = [];
+      for (let v = 0.25; v <= 8; v += 0.25) opts.push(v);
+
+      return (
+        <div className="w-full">
+          <div className="text-center text-4xl font-bold text-green-700 py-3 mb-3">
+            {value ? fmt(value) : '—'}
+          </div>
+          <div className="flex flex-wrap gap-2 justify-center overflow-y-auto max-h-52 pb-2">
+            {opts.map(opt => (
+              <button
+                key={opt}
+                onClick={() => onChange(opt)}
+                className={`px-3 py-2 rounded-xl border text-sm font-medium transition-all active:scale-95 min-w-[4rem]
+                  ${value === opt ? 'border-green-500 bg-green-500 text-white' : 'border-gray-200 bg-white text-gray-600'}`}
+              >
+                {fmt(opt)}
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+    };
+
+    // ── Questionnaire Screen ────────────────────────────────────────────────
+    const Questionnaire = ({ existingDraft, onFinalSave, onDraftSave, onBack }) => {
+      const initAnswers = () => {
+        const base = {};
+        QUESTIONS.forEach(q => { base[q.id] = null; });
+        if (existingDraft?.answers) {
+          Object.assign(base, existingDraft.answers);
+        }
+        return base;
+      };
+
+      const [answers,    setAnswers]    = useState(initAnswers);
+      const [stepIndex,  setStepIndex]  = useState(0);
+      const [toast,      setToast]      = useState(null);
+      const [saving,     setSaving]     = useState(false);
+
+      const showToast = (msg) => {
+        setToast(msg);
+        setTimeout(() => setToast(null), 2000);
+      };
+
+      // Clamp step index when active steps shrink (e.g. conditional answer changes)
+      const activeSteps = getActiveSteps(answers);
+      const clampedIndex = Math.min(stepIndex, Math.max(0, activeSteps.length - 1));
+      useEffect(() => {
+        if (clampedIndex !== stepIndex) setStepIndex(clampedIndex);
+      }, [clampedIndex]);
+
+      const currentStep = activeSteps[clampedIndex];
+      const totalSteps  = activeSteps.length;
+      const isLast      = clampedIndex === totalSteps - 1;
+      const complete    = allAnswered(answers);
+
+      const currentValue = currentStep ? (answers[currentStep.id]?.value ?? null) : null;
+
+      const canGoNext = () => {
+        if (!currentStep) return false;
+        const a = answers[currentStep.id];
+        if (!a || a.value === null || a.value === undefined) return false;
+        if (currentStep.type === 'text' && !String(a.value).trim()) return false;
+        return true;
+      };
+
+      const handleChange = (val) => {
+        setAnswers(prev => {
+          const next = { ...prev, [currentStep.id]: { type: currentStep.type, value: val } };
+          // Clear answers for conditional questions that are no longer active
+          QUESTIONS.forEach(q => {
+            if (q.condition) {
+              const wasActive = q.condition(prev);
+              const nowActive = q.condition(next);
+              if (wasActive && !nowActive) next[q.id] = null;
+            }
+          });
+          return next;
+        });
+      };
+
+      const handleNext = () => {
+        if (!canGoNext()) return;
+        if (clampedIndex < getActiveSteps(answers).length - 1) {
+          setStepIndex(clampedIndex + 1);
+        }
+      };
+
+      const handleBack = () => {
+        if (clampedIndex > 0) setStepIndex(clampedIndex - 1);
+      };
+
+      const handleDraftSave = async () => {
+        await onDraftSave(answers);
+        showToast('Zwischengespeichert 💾');
+      };
+
+      const handleFinalSave = async () => {
+        if (!complete) {
+          const missing = getActiveSteps(answers).filter(q => {
+            const a = answers[q.id];
+            if (!a || a.value === null || a.value === undefined) return true;
+            return q.type === 'text' && !String(a.value).trim();
+          });
+          showToast(`Noch ${missing.length} Frage${missing.length > 1 ? 'n' : ''} offen!`);
+          return;
+        }
+        setSaving(true);
+        await onFinalSave(answers);
+      };
+
+      if (!currentStep) return null;
+
+      return (
+        <div className="flex flex-col bg-green-50" style={{ minHeight: '100dvh' }}>
+          {toast && <Toast msg={toast} />}
+
+          {/* Header */}
+          <div className="bg-white px-4 pt-4 pb-3 shadow-sm flex-none">
+            <div className="flex items-center justify-between mb-3">
+              <button onClick={onBack} className="text-sm text-gray-400 py-1 px-2">✕ Abbrechen</button>
+              <span className="text-sm text-gray-400 font-medium">{clampedIndex + 1} / {totalSteps}</span>
+              <button
+                onClick={handleDraftSave}
+                className="text-sm text-green-600 font-semibold py-1 px-3 bg-green-50 rounded-full active:bg-green-100"
+              >
+                Speichern 💾
+              </button>
+            </div>
+            <div className="w-full bg-gray-100 rounded-full h-2.5">
+              <div
+                className="bg-green-500 h-2.5 rounded-full transition-all duration-400"
+                style={{ width: `${((clampedIndex + 1) / totalSteps) * 100}%` }}
+              />
+            </div>
+          </div>
+
+          {/* Question area */}
+          <div className="flex-1 overflow-y-auto px-5 py-6">
+            {currentStep.isFollowUp && (
+              <div className="mb-3 inline-flex items-center gap-1 px-3 py-1 bg-amber-100 text-amber-700 text-xs font-semibold rounded-full">
+                🐑 Folgefrage
+              </div>
+            )}
+            {isSunday() && currentStep.sundayOnly && (
+              <div className="mb-3 inline-flex items-center gap-1 px-3 py-1 bg-purple-100 text-purple-700 text-xs font-semibold rounded-full ml-2">
+                📅 Sonntagsfrage
+              </div>
+            )}
+
+            <h2 className="text-xl font-bold text-gray-800 mb-6 leading-snug">
+              {currentStep.text}
+            </h2>
+
+            {currentStep.type === 'scale'    && <ScaleInput    value={currentValue} onChange={handleChange} />}
+            {currentStep.type === 'bool'     && <BoolInput     value={currentValue} onChange={handleChange} />}
+            {currentStep.type === 'text'     && <TextInput     value={currentValue} onChange={handleChange} />}
+            {currentStep.type === 'duration' && <DurationInput value={currentValue} onChange={handleChange} />}
+          </div>
+
+          {/* Bottom bar */}
+          <div className="bg-white border-t border-gray-100 px-4 py-4 flex-none" style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}>
+            {complete && (
+              <Btn
+                variant="primary"
+                onClick={handleFinalSave}
+                disabled={saving}
+                className="w-full mb-3 text-lg"
+              >
+                {saving ? 'Wird gespeichert…' : '🐑 Endgültig speichern'}
+              </Btn>
+            )}
+            <div className="flex gap-3">
+              <Btn
+                variant="secondary"
+                onClick={handleBack}
+                disabled={clampedIndex === 0}
+                className="flex-none px-5 py-3"
+              >
+                ← Zurück
+              </Btn>
+              <Btn
+                variant={canGoNext() ? 'primary' : 'ghost'}
+                onClick={handleNext}
+                disabled={!canGoNext() || isLast}
+                className="flex-1 py-3"
+              >
+                {isLast ? '✓ Letzte Frage' : 'Weiter →'}
+              </Btn>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // ── Reward Screen ───────────────────────────────────────────────────────
+    const RewardScreen = ({ streak, onContinue }) => {
+      const count = Math.min(streak.current, 5);
+      return (
+        <div className="flex flex-col items-center justify-center px-6 text-center bg-green-50" style={{ minHeight: '100dvh' }}>
+          <div className="flex justify-center gap-3 mb-4 flex-wrap">
+            {Array.from({ length: count }).map((_, i) => (
+              <SheepSVG
+                key={i}
+                size={i === count - 1 ? 90 : 60}
+                className={i === count - 1 ? 'anim-bounceIn anim-float' : 'anim-float'}
+                style={{ animationDelay: `${i * 0.15}s` }}
+              />
+            ))}
+          </div>
+
+          <h1 className="text-3xl font-bold text-green-700 mt-4 mb-2">Super gemacht! 🎉</h1>
+          <p className="text-lg text-gray-600 mb-1">
+            Du hast{' '}
+            <span className="font-extrabold text-green-600 text-2xl">{streak.current}</span>
+            {' '}Schaf{streak.current !== 1 ? 'e' : ''} gesammelt!
+          </p>
+          {streak.best > 0 && (
+            <p className="text-sm text-gray-400 mb-8">Dein Rekord: {streak.best} Schafe 🏆</p>
+          )}
+          <Btn variant="primary" onClick={onContinue} className="w-full max-w-xs">
+            Zur Startseite
+          </Btn>
+        </div>
+      );
+    };
+
+    // ── Streak Broken Screen ────────────────────────────────────────────────
+    const StreakBrokenScreen = ({ onContinue }) => {
+      const [phase, setPhase] = useState('escape'); // 'escape' | 'repair'
+      useEffect(() => {
+        const t = setTimeout(() => setPhase('repair'), 1800);
+        return () => clearTimeout(t);
+      }, []);
+
+      return (
+        <div className="flex flex-col items-center justify-center px-6 text-center bg-amber-50" style={{ minHeight: '100dvh' }}>
+          {phase === 'escape' ? (
+            <>
+              <div className="text-7xl mb-3 anim-wiggle">🚪</div>
+              <div className="flex gap-2 mb-4 overflow-hidden">
+                {[0, 1, 2].map(i => (
+                  <div key={i} className="anim-runOff" style={{ animationDelay: `${i * 0.2}s` }}>
+                    <SheepSVG size={50} />
+                  </div>
+                ))}
+              </div>
+              <h1 className="text-2xl font-bold text-amber-700">Oh nein!</h1>
+              <p className="text-gray-600">Alle Schafe sind ausgebüxt!</p>
+            </>
+          ) : (
+            <>
+              <ShepherdSVG size={130} className="anim-slideUp mb-4" />
+              <h2 className="text-xl font-bold text-amber-800 mb-2">Der Schäfer repariert den Zaun…</h2>
+              <p className="text-gray-600 text-sm mb-8">Keine Sorge – starte heute einen neuen Lauf!</p>
+              <Btn variant="warn" onClick={onContinue} className="w-full max-w-xs">
+                Neuen Lauf starten 🐑
+              </Btn>
+            </>
+          )}
+        </div>
+      );
+    };
+
+    // ── Meadow Screen (Phase-2-Platzhalter) ─────────────────────────────────
+    const MeadowScreen = ({ streak, onBack }) => {
+      const visible = Math.min(streak.current, 12);
+      return (
+        <div className="flex flex-col bg-green-100" style={{ minHeight: '100dvh' }}>
+          <div className="bg-white px-4 py-4 shadow-sm flex items-center gap-3 flex-none">
+            <button onClick={onBack} className="text-green-600 text-lg px-1">←</button>
+            <h1 className="text-xl font-bold text-gray-800">🌿 Schafwiese</h1>
+            <span className="ml-auto text-sm text-green-700 font-semibold bg-green-100 px-3 py-1 rounded-full">
+              {streak.current} Schaf{streak.current !== 1 ? 'e' : ''}
+            </span>
+          </div>
+
+          <div className="flex-1 flex flex-col items-center justify-center gap-4 px-6 text-center overflow-y-auto py-6">
+            {visible === 0 ? (
+              <>
+                <span className="text-5xl">🌱</span>
+                <p className="text-gray-500 font-medium">Die Wiese ist noch leer.</p>
+                <p className="text-sm text-gray-400">Beantworte deine erste Abfrage!</p>
+              </>
+            ) : (
+              <>
+                <div className="flex flex-wrap justify-center gap-3">
+                  {Array.from({ length: visible }).map((_, i) => (
+                    <SheepSVG
+                      key={i}
+                      size={55}
+                      className="anim-float"
+                      style={{ animationDelay: `${(i * 0.37) % 3}s` }}
+                    />
+                  ))}
+                </div>
+                {streak.current > 12 && (
+                  <p className="text-green-600 font-medium text-sm">…und {streak.current - 12} weitere im Stall 🏠</p>
+                )}
+              </>
+            )}
+            <p className="text-xs text-gray-400 mt-4 bg-white rounded-2xl px-4 py-2 shadow-sm">
+              🌱 Die interaktive Wiese mit Drag & Zoom kommt in Phase 2
+            </p>
+          </div>
+        </div>
+      );
+    };
+
+    // ── Stats Screen (Phase-3-Platzhalter) ──────────────────────────────────
+    const StatsScreen = ({ onBack }) => (
+      <div className="flex flex-col bg-green-50" style={{ minHeight: '100dvh' }}>
+        <div className="bg-white px-4 py-4 shadow-sm flex items-center gap-3">
+          <button onClick={onBack} className="text-green-600 text-lg px-1">←</button>
+          <h1 className="text-xl font-bold text-gray-800">📊 Auswertung</h1>
+        </div>
+        <div className="flex-1 flex flex-col items-center justify-center gap-4 px-6 text-center">
+          <span className="text-6xl">📊</span>
+          <p className="text-lg font-semibold text-gray-700">Kommt in Phase 3</p>
+          <p className="text-sm text-gray-400 max-w-xs">Kalender-Heatmap, Balken- & Kuchendiagramme, Fragenfilter und KI-Textanalyse via Claude</p>
+        </div>
+      </div>
+    );
+
+    // ── Settings Screen ─────────────────────────────────────────────────────
+    const SettingsScreen = ({ settings, onSave, onBack }) => {
+      const [s, setS] = useState({ ...settings });
+      const [saved, setSaved] = useState(false);
+
+      const upd = (k, v) => setS(prev => ({ ...prev, [k]: v }));
+
+      const handleSave = () => {
+        onSave(s);
+        setSaved(true);
+        setTimeout(() => setSaved(false), 1500);
+      };
+
+      const Toggle = ({ value, onChange }) => (
+        <button
+          onClick={() => onChange(!value)}
+          className={`relative w-14 h-7 rounded-full transition-colors ${value ? 'bg-green-500' : 'bg-gray-300'}`}
+        >
+          <div className={`absolute top-0.5 left-0.5 w-6 h-6 bg-white rounded-full shadow transition-transform ${value ? 'translate-x-7' : 'translate-x-0'}`} />
+        </button>
+      );
+
+      return (
+        <div className="flex flex-col bg-green-50" style={{ minHeight: '100dvh' }}>
+          {saved && <Toast msg="Einstellungen gespeichert ✓" />}
+          <div className="bg-white px-4 py-4 shadow-sm flex items-center gap-3 flex-none">
+            <button onClick={onBack} className="text-green-600 text-lg px-1">←</button>
+            <h1 className="text-xl font-bold text-gray-800">⚙️ Einstellungen</h1>
+          </div>
+
+          <div className="flex-1 overflow-y-auto px-4 py-5 flex flex-col gap-4">
+            {/* Sound */}
+            <div className="bg-white rounded-2xl p-4 shadow-sm">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="font-semibold text-gray-800">🔊 Töne</p>
+                  <p className="text-sm text-gray-500">Schaf-Sounds & Melodie</p>
+                </div>
+                <Toggle value={s.soundEnabled} onChange={v => upd('soundEnabled', v)} />
+              </div>
+            </div>
+
+            {/* Push */}
+            <div className="bg-white rounded-2xl p-4 shadow-sm">
+              <p className="font-semibold text-gray-800 mb-4">🔔 Erinnerungen (Android)</p>
+
+              <div className="flex items-center justify-between mb-2">
+                <div>
+                  <p className="text-sm font-medium text-gray-700">Abend-Erinnerung</p>
+                  <p className="text-xs text-gray-400">Du musst noch Schafpflege betreiben!</p>
+                </div>
+                <Toggle value={s.push20Enabled} onChange={v => upd('push20Enabled', v)} />
+              </div>
+              {s.push20Enabled && (
+                <input type="time" value={s.push20Time} onChange={e => upd('push20Time', e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm mb-4" />
+              )}
+
+              <div className="flex items-center justify-between mb-2">
+                <div>
+                  <p className="text-sm font-medium text-gray-700">Letzte-Chance-Alarm</p>
+                  <p className="text-xs text-gray-400">Ohne Schafpflege laufen die Schafe weg!</p>
+                </div>
+                <Toggle value={s.push23Enabled} onChange={v => upd('push23Enabled', v)} />
+              </div>
+              {s.push23Enabled && (
+                <input type="time" value={s.push23Time} onChange={e => upd('push23Time', e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-xl text-sm mb-3" />
+              )}
+
+              <div className="mt-2 px-3 py-2.5 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-700">
+                ℹ️ Echter Background-Push (auch wenn App zu ist) erfordert einen kleinen Server. Wird in Phase 4 via Cloudflare Worker eingerichtet.
+              </div>
+            </div>
+
+            {/* API Key */}
+            <div className="bg-white rounded-2xl p-4 shadow-sm">
+              <p className="font-semibold text-gray-800 mb-1">🔑 Claude API-Schlüssel</p>
+              <p className="text-sm text-gray-500 mb-3">Für Motivationssprüche & Textanalysen. Wird nur lokal gespeichert.</p>
+              <input
+                type="password"
+                value={s.apiKey}
+                onChange={e => upd('apiKey', e.target.value)}
+                placeholder="sk-ant-api03-…"
+                className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl text-sm font-mono focus:border-green-400 focus:outline-none"
+              />
+            </div>
+
+            <Btn variant="primary" onClick={handleSave} className="w-full">
+              Speichern ✓
+            </Btn>
+          </div>
+        </div>
+      );
+    };
+
+    // ── Start Screen ────────────────────────────────────────────────────────
+    const StartScreen = ({ data, streak, todayDone, todayDraft, onStart, onNavigate }) => {
+      const status = todayDone ? 'C' : streak.current > 0 ? 'A' : 'B';
+
+      return (
+        <div className="flex flex-col bg-green-50" style={{ minHeight: '100dvh' }}>
+          <div className="flex-1 flex flex-col items-center justify-center px-6 pt-10 pb-4 text-center overflow-y-auto">
+
+            {status === 'C' && (
+              <div className="anim-slideUp">
+                <SheepSVG size={120} className="anim-float mx-auto" />
+                <h1 className="text-2xl font-bold text-green-700 mt-5 mb-2">
+                  Heute schon erledigt! 🎉
+                </h1>
+                <p className="text-gray-600 mb-1">
+                  Du hast{' '}
+                  <span className="font-extrabold text-green-600 text-2xl">{streak.current}</span>
+                  {' '}Schaf{streak.current !== 1 ? 'e' : ''} gesammelt
+                </p>
+                {streak.best > 0 && (
+                  <p className="text-xs text-gray-400">Rekord: {streak.best} Schafe 🏆</p>
+                )}
+              </div>
+            )}
+
+            {status === 'A' && (
+              <div className="anim-slideUp">
+                <div className="mb-4 rounded-3xl overflow-hidden w-44 h-44 mx-auto bg-green-100 flex items-center justify-center">
+                  <img
+                    src="./img/title-streak.png"
+                    alt="Grasendes Schaf"
+                    className="w-full h-full object-cover"
+                    onError={e => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'flex'; }}
+                  />
+                  <div style={{ display: 'none' }} className="w-full h-full items-center justify-center">
+                    <SheepSVG size={120} className="anim-float" />
+                  </div>
+                </div>
+                <h1 className="text-2xl font-bold text-gray-800 mb-2">
+                  Du willst heute noch<br />ein Schaf sammeln 🐑
+                </h1>
+                <p className="text-gray-500 text-sm">
+                  Lauf: <span className="font-bold text-green-600">{streak.current}</span> Tage am Stück
+                  {streak.best > 0 && <> · Rekord: <span className="font-bold">{streak.best}</span> 🏆</>}
+                </p>
+              </div>
+            )}
+
+            {status === 'B' && (
+              <div className="anim-slideUp">
+                <div className="mb-4 rounded-3xl overflow-hidden w-44 mx-auto bg-amber-50 flex items-center justify-center" style={{ height: 200 }}>
+                  <img
+                    src="./img/title-broken.png"
+                    alt="Schäfer repariert Zaun"
+                    className="w-full h-full object-cover"
+                    onError={e => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'flex'; }}
+                  />
+                  <div style={{ display: 'none' }} className="w-full h-full items-center justify-center">
+                    <ShepherdSVG size={130} />
+                  </div>
+                </div>
+                <h1 className="text-2xl font-bold text-gray-800 mb-2">
+                  Du willst heute noch<br />ein Schaf sammeln 🐑
+                </h1>
+                <p className="text-gray-500 text-sm">Starte deinen ersten Lauf!</p>
+              </div>
+            )}
+
+            {todayDraft && !todayDone && (
+              <div className="mt-4 px-4 py-2 bg-amber-50 border border-amber-200 rounded-full text-sm text-amber-700">
+                📝 Du hast einen angefangenen Eintrag
+              </div>
+            )}
+          </div>
+
+          {/* CTA Button */}
+          {!todayDone && (
+            <div className="px-6 pb-3">
+              <Btn variant="primary" onClick={onStart} className="w-full text-lg py-5">
+                {todayDraft ? '🐑 Weitermachen' : '🐑 Auf geht\'s!'}
+              </Btn>
+            </div>
+          )}
+
+          {todayDone && (
+            <div className="px-6 pb-3">
+              <Btn variant="secondary" onClick={() => onNavigate('meadow')} className="w-full text-lg py-4">
+                🌿 Zur Schafwiese
+              </Btn>
+            </div>
+          )}
+
+          {/* Bottom nav */}
+          <div className="bg-white border-t border-gray-100 flex-none" style={{ paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom))' }}>
+            <div className="flex">
+              {[
+                { id: 'meadow',   icon: '🌿', label: 'Wiese' },
+                { id: 'stats',    icon: '📊', label: 'Auswertung' },
+                { id: 'settings', icon: '⚙️',  label: 'Einstellungen' },
+              ].map(({ id, icon, label }) => (
+                <button
+                  key={id}
+                  onClick={() => onNavigate(id)}
+                  className="flex-1 flex flex-col items-center gap-0.5 py-3 text-gray-400 active:text-green-600 transition-colors"
+                >
+                  <span className="text-2xl leading-none">{icon}</span>
+                  <span className="text-xs font-medium">{label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // ── App Root ────────────────────────────────────────────────────────────
+    function App() {
+      const [screen, setScreen] = useState('loading');
+      const [data,   setData]   = useState(null);
+
+      useEffect(() => {
+        loadData().then(d => {
+          const status = streakStatus(d.streak);
+          if (status === 'broken') {
+            const updated = { ...d, streak: { ...d.streak, current: 0 } };
+            setData(updated);
+            saveData(updated);
+            setScreen('streakBroken');
+          } else {
+            setData(d);
+            setScreen('start');
+          }
+        });
+      }, []);
+
+      const today       = dateKey();
+      const todayEntry  = data?.entries?.[today];
+      const todayDone   = !!(todayEntry?.completed && !todayEntry?.draft);
+      const todayDraft  = !!(todayEntry && !todayDone);
+
+      const handleFinalSave = async (answers) => {
+        const status  = streakStatus(data.streak);
+        const newCurr = status === 'active' ? data.streak.current + 1 : 1;
+        const newBest = Math.max(data.streak.best, newCurr);
+
+        const updated = {
+          ...data,
+          entries: {
+            ...data.entries,
+            [today]: {
+              appSchemaVersion: APP_SCHEMA_VERSION,
+              completed: true,
+              draft: false,
+              completedAt: new Date().toISOString(),
+              answers,
+            },
+          },
+          streak: { current: newCurr, best: newBest, lastCompletedDate: today },
+        };
+        setData(updated);
+        await saveData(updated);
+        setScreen('reward');
+      };
+
+      const handleDraftSave = async (answers) => {
+        const updated = {
+          ...data,
+          entries: {
+            ...data.entries,
+            [today]: {
+              appSchemaVersion: APP_SCHEMA_VERSION,
+              completed: false,
+              draft: true,
+              savedAt: new Date().toISOString(),
+              answers,
+            },
+          },
+        };
+        setData(updated);
+        await saveData(updated);
+      };
+
+      const handleSaveSettings = async (newSettings) => {
+        const updated = { ...data, settings: newSettings };
+        setData(updated);
+        await saveData(updated);
+        setScreen('start');
+      };
+
+      // ── Screens ──
+      if (screen === 'loading' || !data) {
+        return (
+          <div className="flex flex-col items-center justify-center bg-green-50" style={{ minHeight: '100dvh' }}>
+            <SheepSVG size={90} className="anim-float" />
+            <p className="text-green-600 mt-5 font-semibold text-lg">SheepCare wird geladen…</p>
+          </div>
+        );
+      }
+
+      if (screen === 'streakBroken') {
+        return <StreakBrokenScreen onContinue={() => setScreen('start')} />;
+      }
+
+      if (screen === 'questionnaire') {
+        return (
+          <Questionnaire
+            existingDraft={todayDraft ? todayEntry : null}
+            onFinalSave={handleFinalSave}
+            onDraftSave={handleDraftSave}
+            onBack={() => setScreen('start')}
+          />
+        );
+      }
+
+      if (screen === 'reward') {
+        return <RewardScreen streak={data.streak} onContinue={() => setScreen('start')} />;
+      }
+
+      if (screen === 'settings') {
+        return <SettingsScreen settings={data.settings} onSave={handleSaveSettings} onBack={() => setScreen('start')} />;
+      }
+
+      if (screen === 'meadow') {
+        return <MeadowScreen streak={data.streak} onBack={() => setScreen('start')} />;
+      }
+
+      if (screen === 'stats') {
+        return <StatsScreen onBack={() => setScreen('start')} />;
+      }
+
+      return (
+        <StartScreen
+          data={data}
+          streak={data.streak}
+          todayDone={todayDone}
+          todayDraft={todayDraft}
+          onStart={() => setScreen('questionnaire')}
+          onNavigate={setScreen}
+        />
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+  </script>
+</body>
+</html>
