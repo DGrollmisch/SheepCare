@@ -17,6 +17,10 @@
   <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.25.6/babel.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/idb-keyval@6/dist/umd.js"></script>
 
+  <!-- Recharts (Phase 3: Auswertung) -->
+  <script src="https://cdn.jsdelivr.net/npm/prop-types@15.8.1/prop-types.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/recharts@2.12.7/umd/Recharts.js"></script>
+
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js'));
@@ -414,6 +418,38 @@
       } catch (e) {
         console.error('Speichern fehlgeschlagen', e);
       }
+    };
+
+    // ── Claude API (Browser-Direct, kein Backend) ───────────────────────────
+    const MODEL_SONNET = 'claude-sonnet-4-6'; // Auswertungs-Analyse
+    const MODEL_HAIKU  = 'claude-haiku-4-5';  // Motivationssprüche (Phase 4)
+
+    const callClaude = async (apiKey, model, system, userMessage, maxTokens = 1024) => {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: maxTokens,
+          system,
+          messages: [{ role: 'user', content: userMessage }],
+        }),
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        throw new Error(`API ${res.status}: ${txt.slice(0, 200)}`);
+      }
+      const data = await res.json();
+      return (data.content || [])
+        .filter(c => c.type === 'text')
+        .map(c => c.text)
+        .join('')
+        .trim();
     };
 
     // ── Streak Logic ────────────────────────────────────────────────────────
@@ -938,20 +974,415 @@
       );
     };
 
-    // ── Stats Screen (Phase-3-Platzhalter) ──────────────────────────────────
-    const StatsScreen = ({ onBack }) => (
-      <div className="flex flex-col bg-green-50" style={{ minHeight: '100dvh' }}>
-        <div className="bg-white px-4 py-4 shadow-sm flex items-center gap-3">
-          <button onClick={onBack} className="text-green-600 text-lg px-1">←</button>
-          <h1 className="text-xl font-bold text-gray-800">📊 Auswertung</h1>
+    // ── Auswertung: Helpers ─────────────────────────────────────────────────
+    // Kurzlabels für den Fragenfilter (Dropdown)
+    const QUESTION_SHORT = {
+      q_lieb_zu_mir:           'Lieb zu mir',
+      q_spiegel:               'Im Spiegel angelächelt',
+      q_geduldig_mit_mir:      'Geduldig mit mir',
+      q_geduldig_mit_anderen:  'Geduldig mit anderen',
+      q_stress:                'Nicht gestresst',
+      q_mahlzeiten:            'Ausgewogene Mahlzeiten',
+      q_welche_mahlzeit:       'Welche Mahlzeit(en) nicht',
+      q_zeit_fuer_mich:        'Zeit für mich genommen',
+      q_wie_viel:              'Wie viel Zeit',
+      q_fuer_was:              'Wofür Zeit genommen',
+      q_warum_nicht:           'Ausreden (keine Zeit)',
+      q_freude:                'Freude / Lachen',
+      q_stolz:                 'Worauf stolz',
+      q_sonntag_entscheidung:  'Eigene Entscheidung',
+      q_waage:                 'Waage 3× / Woche',
+      q_trennung:              'Von etwas getrennt',
+      q_trennung_was:          'Wovon getrennt',
+    };
+
+    const completedList = (entries) =>
+      Object.entries(entries || {})
+        .filter(([, e]) => e && e.completed && !e.draft)
+        .map(([date, e]) => ({ date, answers: e.answers || {} }))
+        .sort((a, b) => a.date < b.date ? -1 : 1);
+
+    const answerVal = (entry, qid) => {
+      const a = entry.answers[qid];
+      if (!a || a.value === null || a.value === undefined) return null;
+      return a.value;
+    };
+
+    // Numerischer Wert für Diagramme: scale 0-100, bool→0/100, duration→Stunden
+    const numericVal = (entry, qid, qtype) => {
+      const v = answerVal(entry, qid);
+      if (v === null) return null;
+      if (qtype === 'bool') return v === true ? 100 : 0;
+      return typeof v === 'number' ? v : null;
+    };
+
+    // Gemeinsamer Farbcode (Wert 0–100) für Heatmap UND Balkendiagramm → homogen
+    const GREEN = '#22c55e';
+    const VALUE_COLORS = ['#fecaca', '#fed7aa', '#fde68a', '#86efac', '#22c55e']; // 0,25,50,75,100
+    const valueColor = (v) => {
+      if (v === null || v === undefined || isNaN(v)) return '#e5e7eb';
+      return VALUE_COLORS[Math.min(4, Math.max(0, Math.round(v / 25)))];
+    };
+
+    // Heatmap-Farbe je nach Fragentyp (nutzt denselben valueColor wie die Balken)
+    const cellColor = (entry, qid, qtype) => {
+      if (!entry) return '#e5e7eb';                 // kein Eintrag
+      if (qid === '__completion') return GREEN;     // beantwortet
+      const v = answerVal(entry, qid);
+      if (v === null) return '#f1f5f9';             // Tag beantwortet, aber Frage ohne Wert
+      if (qtype === 'scale') return valueColor(v);
+      if (qtype === 'bool')  return valueColor(v === true ? 100 : 0);
+      return GREEN; // text / duration: einfach „vorhanden"
+    };
+
+    // Zeitraum-Optionen für die Textfeld-KI-Analyse
+    const TEXT_PERIODS = [
+      { id: '7',   label: 'Letzte 7 Tage',     days: 7 },
+      { id: '30',  label: 'Letzte 30 Tage',    days: 30 },
+      { id: '90',  label: 'Letzte 90 Tage',    days: 90 },
+      { id: '365', label: 'Letztes Jahr',      days: 365 },
+      { id: 'all', label: 'Gesamter Zeitraum', days: null },
+    ];
+
+    // Letzte N Tage als dateKey-Liste (älteste zuerst)
+    const lastNDays = (n) => {
+      const out = [];
+      const today = new Date();
+      for (let i = n - 1; i >= 0; i--) {
+        const d = new Date(today);
+        d.setDate(today.getDate() - i);
+        out.push(dateKey(d));
+      }
+      return out;
+    };
+
+    // Balkendiagramm-Daten je nach Periode
+    const bucketData = (entries, qid, qtype, period) => {
+      const byDate = {};
+      completedList(entries).forEach(e => { byDate[e.date] = e; });
+      const avg = (vals) => vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : null;
+      const avgF = (vals) => vals.length ? Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 4) / 4 : null;
+
+      if (period === 'days') {
+        return lastNDays(30).map(dk => {
+          const e = byDate[dk];
+          const v = e ? numericVal(e, qid, qtype) : null;
+          return { label: dk.slice(8), value: qtype === 'duration' ? (v === null ? null : v) : v };
+        });
+      }
+      // Wochen / Monate: gruppieren + Durchschnitt
+      const buckets = [];
+      const now = new Date();
+      const count = 12;
+      for (let i = count - 1; i >= 0; i--) {
+        let label, from, to;
+        if (period === 'weeks') {
+          const end = new Date(now); end.setDate(now.getDate() - i * 7);
+          const start = new Date(end); start.setDate(end.getDate() - 6);
+          from = dateKey(start); to = dateKey(end);
+          label = 'KW' + start.getDate();
+        } else { // months
+          const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+          from = dateKey(new Date(d.getFullYear(), d.getMonth(), 1));
+          to = dateKey(new Date(d.getFullYear(), d.getMonth() + 1, 0));
+          label = ['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez'][d.getMonth()];
+        }
+        const vals = Object.keys(byDate)
+          .filter(dk => dk >= from && dk <= to)
+          .map(dk => numericVal(byDate[dk], qid, qtype))
+          .filter(v => v !== null);
+        buckets.push({ label, value: qtype === 'duration' ? avgF(vals) : avg(vals) });
+      }
+      return buckets;
+    };
+
+    // Verteilungs-Daten fürs Kuchendiagramm
+    const distData = (entries, qid, qtype) => {
+      const list = completedList(entries);
+      if (qtype === 'scale') {
+        const counts = { 100: 0, 75: 0, 50: 0, 25: 0, 0: 0 };
+        list.forEach(e => { const v = answerVal(e, qid); if (v !== null && v in counts) counts[v]++; });
+        const colors = { 100: '#22c55e', 75: '#86efac', 50: '#fde68a', 25: '#fed7aa', 0: '#fecaca' };
+        return SCALE_OPTIONS.map(o => ({ name: o.label, value: counts[o.value], color: colors[o.value] }))
+          .filter(d => d.value > 0);
+      }
+      if (qtype === 'bool') {
+        let yes = 0, no = 0;
+        list.forEach(e => { const v = answerVal(e, qid); if (v === true) yes++; else if (v === false) no++; });
+        return [
+          { name: 'Ja', value: yes, color: '#22c55e' },
+          { name: 'Nein', value: no, color: '#fca5a5' },
+        ].filter(d => d.value > 0);
+      }
+      return [];
+    };
+
+    // Zusammenfassungs-Statistik (Prozent/Stunden + Anzahl)
+    const summaryStat = (entries, qid, qtype) => {
+      const list = completedList(entries);
+      const vals = list.map(e => numericVal(e, qid, qtype)).filter(v => v !== null);
+      if (!vals.length) return null;
+      const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+      if (qtype === 'duration') {
+        return { main: (Math.round(mean * 4) / 4).toFixed(2).replace(/\.?0+$/, '') + ' Std', sub: `Ø über ${vals.length} Tage`, pct: null };
+      }
+      return { main: Math.round(mean) + '%', sub: qtype === 'bool' ? `Ja an ${Math.round(mean)}% der Tage` : `Ø über ${vals.length} Tage`, pct: Math.round(mean) };
+    };
+
+    // ── Stats Screen (Auswertung) ───────────────────────────────────────────
+    const StatsScreen = ({ entries, apiKey, onBack }) => {
+      const RC = window.Recharts;
+      const [qid, setQid]         = useState('__completion');
+      const [period, setPeriod]   = useState('days');
+      const [textPeriod, setTextPeriod] = useState('30');
+      const [analysis, setAnalysis] = useState(null);
+      const [analyzing, setAnalyzing] = useState(false);
+      const [error, setError]     = useState(null);
+
+      const question = QUESTIONS.find(q => q.id === qid);
+      const qtype = qid === '__completion' ? 'completion' : (question ? question.type : null);
+
+      const list = completedList(entries);
+      const heatDays = lastNDays(126);
+      const byDate = {};
+      list.forEach(e => { byDate[e.date] = e; });
+
+      // Leading-Padding, damit Spalten nach Wochentag (Mo-first) ausgerichtet sind
+      const firstWeekday = (new Date(heatDays[0] + 'T12:00:00').getDay() + 6) % 7;
+
+      const stat   = (qtype === 'scale' || qtype === 'bool' || qtype === 'duration') ? summaryStat(entries, qid, qtype) : null;
+      const bars   = (qtype === 'scale' || qtype === 'bool' || qtype === 'duration') ? bucketData(entries, qid, qtype, period) : [];
+      const pie    = (qtype === 'scale' || qtype === 'bool') ? distData(entries, qid, qtype) : [];
+      const isPct  = qtype === 'scale' || qtype === 'bool';
+
+      const tp = TEXT_PERIODS.find(p => p.id === textPeriod) || TEXT_PERIODS[1];
+      const textCutoff = tp.days ? lastNDays(tp.days)[0] : '0000-00-00';
+      const textAnswers = qtype === 'text'
+        ? list.map(e => ({ date: e.date, text: answerVal(e, qid) }))
+              .filter(x => x.text && x.date >= textCutoff)
+        : [];
+
+      const runAnalysis = async () => {
+        setError(null);
+        if (!apiKey) { setError('Kein API-Schlüssel in den Einstellungen hinterlegt.'); return; }
+        if (!textAnswers.length) { setError('Keine Antworten für diese Frage vorhanden.'); return; }
+        setAnalyzing(true);
+        setAnalysis(null);
+        try {
+          const frageText = question.text;
+          const corpus = textAnswers.map(x => `[${x.date}] ${x.text}`).join('\n');
+          const system = 'Du bist eine einfühlsame Self-Care-Begleiterin. Analysiere die Tagebuch-Antworten einer Person über einen Zeitraum. Antworte in liebevoller, motivierender und unterstützender Prosa auf Deutsch (2–4 Absätze). Verschleiere keine Fakten, benenne auch Muster oder Sorgen ehrlich, aber wohlwollend. Sprich die Person direkt mit „du" an.';
+          const user = `Frage: „${frageText}"\nZeitraum: ${tp.label}\n\nAntworten über die Zeit:\n${corpus}`;
+          const result = await callClaude(apiKey, MODEL_SONNET, system, user, 1024);
+          setAnalysis(result);
+        } catch (e) {
+          setError(e.message || 'Analyse fehlgeschlagen.');
+        } finally {
+          setAnalyzing(false);
+        }
+      };
+
+      const Card = ({ children, className = '' }) => (
+        <div className={`bg-white rounded-2xl p-4 shadow-sm ${className}`}>{children}</div>
+      );
+
+      return (
+        <div className="flex flex-col bg-green-50" style={{ minHeight: '100dvh' }}>
+          <div className="bg-white px-4 py-4 shadow-sm flex items-center gap-3 flex-none">
+            <button onClick={onBack} className="text-green-600 text-lg px-1">←</button>
+            <h1 className="text-xl font-bold text-gray-800">📊 Auswertung</h1>
+            <span className="ml-auto text-xs text-gray-400">{list.length} Tage erfasst</span>
+          </div>
+
+          <div className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-4">
+            {list.length === 0 && (
+              <Card className="text-center">
+                <span className="text-5xl">🌱</span>
+                <p className="text-gray-500 font-medium mt-2">Noch keine Daten.</p>
+                <p className="text-sm text-gray-400">Beantworte deine erste Abfrage, dann erscheint hier deine Auswertung.</p>
+              </Card>
+            )}
+
+            {list.length > 0 && (
+              <>
+                {/* Fragenfilter */}
+                <Card>
+                  <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Frage auswählen</label>
+                  <select
+                    value={qid}
+                    onChange={e => { setQid(e.target.value); setAnalysis(null); setError(null); }}
+                    className="w-full mt-2 px-3 py-2.5 border-2 border-gray-200 rounded-xl bg-white text-gray-800 text-sm"
+                  >
+                    <option value="__completion">🗓️ Allgemein: beantwortete Tage</option>
+                    {QUESTIONS.map(q => (
+                      <option key={q.id} value={q.id}>
+                        {q.type === 'text' ? '✍️' : q.type === 'scale' ? '📊' : q.type === 'bool' ? '✓' : '⏱️'} {QUESTION_SHORT[q.id] || q.id}
+                      </option>
+                    ))}
+                  </select>
+                </Card>
+
+                {/* Kalender-Heatmap */}
+                <Card>
+                  <p className="text-sm font-semibold text-gray-700 mb-3">Kalender (letzte 18 Wochen)</p>
+                  <div className="overflow-x-auto">
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateRows: 'repeat(7, 13px)',
+                        gridAutoFlow: 'column',
+                        gap: '3px',
+                        width: 'max-content',
+                      }}
+                    >
+                      {Array.from({ length: firstWeekday }).map((_, i) => (
+                        <div key={'pad' + i} style={{ width: 13, height: 13 }} />
+                      ))}
+                      {heatDays.map(dk => (
+                        <div
+                          key={dk}
+                          title={dk}
+                          style={{
+                            width: 13, height: 13, borderRadius: 3,
+                            background: cellColor(byDate[dk], qid, qtype),
+                          }}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 mt-3 text-xs text-gray-400 flex-wrap">
+                    {qtype === 'scale' && <>
+                      <span className="flex items-center gap-1"><i style={{ width: 10, height: 10, background: '#fecaca', borderRadius: 2, display: 'inline-block' }} /> 0%</span>
+                      <span className="flex items-center gap-1"><i style={{ width: 10, height: 10, background: '#fde68a', borderRadius: 2, display: 'inline-block' }} /> 50%</span>
+                      <span className="flex items-center gap-1"><i style={{ width: 10, height: 10, background: '#22c55e', borderRadius: 2, display: 'inline-block' }} /> 100%</span>
+                    </>}
+                    {qtype === 'bool' && <>
+                      <span className="flex items-center gap-1"><i style={{ width: 10, height: 10, background: '#22c55e', borderRadius: 2, display: 'inline-block' }} /> Ja</span>
+                      <span className="flex items-center gap-1"><i style={{ width: 10, height: 10, background: '#fca5a5', borderRadius: 2, display: 'inline-block' }} /> Nein</span>
+                    </>}
+                    {(qtype === 'completion' || qtype === 'text' || qtype === 'duration') && <>
+                      <span className="flex items-center gap-1"><i style={{ width: 10, height: 10, background: '#22c55e', borderRadius: 2, display: 'inline-block' }} /> beantwortet</span>
+                      <span className="flex items-center gap-1"><i style={{ width: 10, height: 10, background: '#e5e7eb', borderRadius: 2, display: 'inline-block' }} /> offen</span>
+                    </>}
+                  </div>
+                </Card>
+
+                {/* Zusammenfassung */}
+                {stat && (
+                  <Card className="text-center">
+                    <p className="text-xs text-gray-400 uppercase tracking-wide">{QUESTION_SHORT[qid]}</p>
+                    <p className="text-4xl font-extrabold text-green-600 my-1">{stat.main}</p>
+                    <p className="text-sm text-gray-500">{stat.sub}</p>
+                  </Card>
+                )}
+
+                {/* Balkendiagramm */}
+                {(qtype === 'scale' || qtype === 'bool' || qtype === 'duration') && (
+                  <Card>
+                    <div className="flex items-center justify-between mb-3">
+                      <p className="text-sm font-semibold text-gray-700">Verlauf</p>
+                      <select
+                        value={period}
+                        onChange={e => setPeriod(e.target.value)}
+                        className="text-xs border border-gray-200 rounded-lg px-2 py-1 bg-white text-gray-600"
+                      >
+                        <option value="days">30 Tage</option>
+                        <option value="weeks">12 Wochen</option>
+                        <option value="months">12 Monate</option>
+                      </select>
+                    </div>
+                    {RC ? (
+                      <div style={{ width: '100%', height: 180 }}>
+                        <RC.ResponsiveContainer width="100%" height="100%">
+                          <RC.BarChart data={bars} margin={{ top: 4, right: 4, left: -20, bottom: 0 }}>
+                            <RC.XAxis dataKey="label" tick={{ fontSize: 9 }} interval="preserveStartEnd" />
+                            <RC.YAxis tick={{ fontSize: 9 }} domain={isPct ? [0, 100] : [0, 'auto']} />
+                            <RC.Tooltip formatter={(v) => isPct ? v + '%' : v + ' Std'} labelStyle={{ fontSize: 11 }} />
+                            <RC.Bar dataKey="value" radius={[3, 3, 0, 0]}>
+                              {bars.map((d, i) => (
+                                <RC.Cell key={i} fill={qtype === 'duration' ? GREEN : valueColor(d.value)} />
+                              ))}
+                            </RC.Bar>
+                          </RC.BarChart>
+                        </RC.ResponsiveContainer>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-gray-400">Diagramm-Bibliothek nicht geladen.</p>
+                    )}
+                  </Card>
+                )}
+
+                {/* Kuchendiagramm */}
+                {pie.length > 0 && RC && (
+                  <Card>
+                    <p className="text-sm font-semibold text-gray-700 mb-2">Verteilung</p>
+                    <div style={{ width: '100%', height: 200 }}>
+                      <RC.ResponsiveContainer width="100%" height="100%">
+                        <RC.PieChart>
+                          <RC.Pie data={pie} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={70} label={(e) => e.value}>
+                            {pie.map((d, i) => <RC.Cell key={i} fill={d.color} />)}
+                          </RC.Pie>
+                          <RC.Tooltip />
+                        </RC.PieChart>
+                      </RC.ResponsiveContainer>
+                    </div>
+                    <div className="flex flex-wrap gap-2 justify-center mt-1">
+                      {pie.map((d, i) => (
+                        <span key={i} className="flex items-center gap-1 text-xs text-gray-500">
+                          <i style={{ width: 10, height: 10, background: d.color, borderRadius: 2, display: 'inline-block' }} /> {d.name} ({d.value})
+                        </span>
+                      ))}
+                    </div>
+                  </Card>
+                )}
+
+                {/* Textfragen: Antworten + KI-Analyse */}
+                {qtype === 'text' && (
+                  <Card>
+                    <div className="flex items-center justify-between mb-1">
+                      <p className="text-sm font-semibold text-gray-700">KI-Analyse (Claude Sonnet)</p>
+                      <select
+                        value={textPeriod}
+                        onChange={e => { setTextPeriod(e.target.value); setAnalysis(null); setError(null); }}
+                        className="text-xs border border-gray-200 rounded-lg px-2 py-1 bg-white text-gray-600"
+                      >
+                        {TEXT_PERIODS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+                      </select>
+                    </div>
+                    <p className="text-xs text-gray-400 mb-3">{textAnswers.length} Antwort{textAnswers.length !== 1 ? 'en' : ''} im gewählten Zeitraum</p>
+
+                    {error && (
+                      <div className="mb-3 px-3 py-2 bg-red-50 border border-red-200 rounded-xl text-xs text-red-600">{error}</div>
+                    )}
+
+                    {analysis && (
+                      <div className="mb-3 px-4 py-3 bg-green-50 border border-green-200 rounded-xl text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">
+                        {analysis}
+                      </div>
+                    )}
+
+                    <Btn variant="primary" onClick={runAnalysis} disabled={analyzing} className="w-full">
+                      {analyzing ? 'Analysiere…' : '✨ Analyse starten'}
+                    </Btn>
+
+                    {textAnswers.length > 0 && (
+                      <div className="mt-4 flex flex-col gap-2">
+                        {textAnswers.slice().reverse().map((x, i) => (
+                          <div key={i} className="px-3 py-2 bg-gray-50 rounded-xl">
+                            <p className="text-xs text-gray-400">{x.date}</p>
+                            <p className="text-sm text-gray-700">{x.text}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </Card>
+                )}
+              </>
+            )}
+          </div>
         </div>
-        <div className="flex-1 flex flex-col items-center justify-center gap-4 px-6 text-center">
-          <span className="text-6xl">📊</span>
-          <p className="text-lg font-semibold text-gray-700">Kommt in Phase 3</p>
-          <p className="text-sm text-gray-400 max-w-xs">Kalender-Heatmap, Balken- & Kuchendiagramme, Fragenfilter und KI-Textanalyse via Claude</p>
-        </div>
-      </div>
-    );
+      );
+    };
 
     // ── Settings Screen ─────────────────────────────────────────────────────
     const SettingsScreen = ({ settings, onSave, onBack }) => {
@@ -1289,7 +1720,7 @@
       }
 
       if (screen === 'stats') {
-        return <StatsScreen onBack={() => setScreen('start')} />;
+        return <StatsScreen entries={data.entries} apiKey={data.settings.apiKey} onBack={() => setScreen('start')} />;
       }
 
       return (
