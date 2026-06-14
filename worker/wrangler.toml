@@ -1,0 +1,25 @@
+name = "sheepcare-push"
+main = "index.js"
+compatibility_date = "2024-09-01"
+
+# Cron: alle 15 Minuten prüfen, ob ein Reminder fällig ist (UTC – der Worker
+# rechnet die lokale Zeit je Gerät selbst aus, inkl. Sommer-/Winterzeit).
+[triggers]
+crons = ["*/15 * * * *"]
+
+# KV-Namespace für die Push-Subscriptions.
+# ID nach `wrangler kv namespace create SUBS` hier eintragen:
+[[kv_namespaces]]
+binding = "SUBS"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[vars]
+# Öffentlicher VAPID-Key (darf öffentlich sein) – identisch zu VAPID_PUBLIC_KEY in index.html
+VAPID_PUBLIC_KEY = "REPLACE_WITH_VAPID_PUBLIC_KEY"
+VAPID_SUBJECT    = "mailto:mr.blue90@gmx.net"
+# Shared Secret – identisch zu PUSH_TOKEN in index.html. Schützt nur gegen
+# willkürliches Registrieren; bitte auf einen eigenen Wert ändern.
+PUSH_TOKEN       = "CHANGE_ME"
+
+# VAPID_PRIVATE_KEY wird NICHT hier abgelegt, sondern als Secret:
+#   wrangler secret put VAPID_PRIVATE_KEY
