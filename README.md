@@ -29,11 +29,11 @@ npx serve -l 3000 .
 3. Nach 1–2 Minuten erreichbar unter `https://<user>.github.io/SheepCare/`.
 4. **Bei jedem Update** `CACHE_NAME` in `sw.js` hochzählen (sonst lädt das Handy die alte Version).
 
-## Noch offen (bewusst ans Ende verschoben)
-- **App-Icons** `icon-192.png` / `icon-512.png` und Titelbilder `img/title-*.png` fehlen noch
-  (geplant als KI-Assets via Midjourney/DALL-E). Bis dahin greifen Inline-SVG-Fallbacks.
-- **Push-Benachrichtigungen**: Cloudflare-Worker deployen – Schritt-für-Schritt in
-  [`worker/README.md`](worker/README.md).
+## Noch offen (Feinschliff)
+- **Grafik-Politur**: App-Icons sind aktuell prozedurale **Platzhalter**; Titelbilder
+  `img/title-*.png` fehlen noch (SVG-Fallbacks aktiv). Geplant als KI-Assets via Midjourney/DALL-E.
+- **Push-Benachrichtigungen**: Worker ist deployed (`worker/`); Setup-Doku in
+  [`worker/README.md`](worker/README.md). Offen nur noch der reale Geräte-Test.
 
 ## Daten & Privatsphäre
 Alle Antworten bleiben lokal auf dem Gerät (IndexedDB). Der optionale Claude-API-Schlüssel
