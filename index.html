@@ -370,6 +370,7 @@
       entries: {},
       streak: { current: 0, best: 0, lastCompletedDate: null },
       dailyMotivation: { date: null, text: '' },
+      game: { waterDate: null, gameDoneDate: null, shorn: {} },
       settings: {
         soundEnabled: true,
         push20Enabled: true,
@@ -390,6 +391,7 @@
         entries:  raw.entries  || {},
         streak:   { ...DEFAULT_DATA().streak,   ...(raw.streak   || {}) },
         dailyMotivation: { ...DEFAULT_DATA().dailyMotivation, ...(raw.dailyMotivation || {}) },
+        game:     { ...DEFAULT_DATA().game, ...(raw.game || {}), shorn: { ...(raw.game && raw.game.shorn || {}) } },
         settings: { ...DEFAULT_DATA().settings, ...(raw.settings || {}) },
       };
 
@@ -1077,53 +1079,333 @@
     };
 
     // ── Meadow Screen (Phase-2-Platzhalter) ─────────────────────────────────
-    const MeadowScreen = ({ streak, onBack }) => {
-      const visible = Math.min(streak.current, 12);
+    // Seeded RNG (deterministische Schaf-/Deko-Platzierung)
+    const mulberry32 = (a) => () => {
+      a |= 0; a = a + 0x6D2B79F5 | 0;
+      let t = Math.imul(a ^ a >>> 15, 1 | a);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+    const WORLD_W = 1600, WORLD_H = 1100;
+    const BARN = { x: 250, y: 230 };           // Stall-Position (Welt)
+    const BARN_DOOR = { x: 250, y: 300 };
+    const TROUGH = { x: 430, y: 250, w: 90, h: 34 };
+
+    const MeadowScreen = ({ streak, game, todayDone, onPersistGame, onBack }) => {
+      const visible = Math.min(streak.current, 50);
+      const inStallCount = Math.max(0, streak.current - 50);
+      const today = dateKey();
+      const doneToday = game && game.gameDoneDate === today;
+      const woolStageFor = (i) => {
+        const shorn = game && game.shorn && game.shorn[i];
+        const age = shorn ? daysBetween(today, shorn) : (streak.current - 1 - i);
+        return Math.max(0, Math.min(6, age));
+      };
+
+      const canvasRef = useRef(null);
+      const wrapRef   = useRef(null);
+      const engineRef = useRef(null);
+      const toolRef   = useRef('none');
+
+      const [tool, setTool]   = useState('none');       // 'none' | 'shear'
+      const [night, setNight] = useState(doneToday);
+      const [waterOk, setWaterOk] = useState(game && game.waterDate === today);
+      const [allIn, setAllIn] = useState(false);
+
+      useEffect(() => { toolRef.current = todayDone ? tool : 'none'; }, [tool, todayDone]);
 
       useEffect(() => {
         SoundManager.startMelody();
         return () => SoundManager.stopMelody();
       }, []);
+      useChorus(visible > 0 && !night, visible);
 
-      useChorus(visible > 0, visible);
+      // ── Spiel-Engine ──────────────────────────────────────────────────────
+      useEffect(() => {
+        const canvas = canvasRef.current, wrap = wrapRef.current;
+        if (!canvas || !wrap) return;
+        const ctx = canvas.getContext('2d');
+        let raf = 0, dpr = 1, W = 0, H = 0;
+        const cam = { x: WORLD_W / 2, y: WORLD_H / 2, zoom: 0.6 };
+
+        const resize = () => {
+          dpr = Math.min(window.devicePixelRatio || 1, 2);
+          W = wrap.clientWidth; H = wrap.clientHeight;
+          canvas.width = W * dpr; canvas.height = H * dpr;
+          canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+        };
+        resize();
+        const ro = new ResizeObserver(resize); ro.observe(wrap);
+
+        const rnd = mulberry32(98765);
+        // Deko
+        const deco = [];
+        for (let i = 0; i < 16; i++) deco.push({ t: 'tree', x: 80 + rnd() * (WORLD_W - 160), y: 120 + rnd() * (WORLD_H - 200), s: 0.8 + rnd() * 0.6 });
+        for (let i = 0; i < 22; i++) deco.push({ t: 'rock', x: 60 + rnd() * (WORLD_W - 120), y: 120 + rnd() * (WORLD_H - 160), s: 0.6 + rnd() * 0.8 });
+        const pond = { x: WORLD_W * 0.72, y: WORLD_H * 0.68, rx: 180, ry: 110 };
+        deco.sort((a, b) => a.y - b.y);
+
+        // Schafe
+        const srnd = mulberry32(424242);
+        const sheep = [];
+        for (let i = 0; i < visible; i++) {
+          const hx = 180 + srnd() * (WORLD_W - 360);
+          const hy = 360 + srnd() * (WORLD_H - 440);
+          sheep.push({
+            id: i, x: hx, y: hy, hx, hy, vx: 0, vy: 0,
+            t: srnd() * 100, face: srnd() < 0.5 ? 1 : -1,
+            nextMove: srnd() * 3, inStall: false, stage: woolStageFor(i),
+          });
+        }
+
+        // Eingabe-Status
+        const ptrs = new Map();
+        let down = false, sx0 = 0, sy0 = 0, lastX = 0, lastY = 0, moved = false, panning = false, downTime = 0;
+        let driving = false, fingerW = null, holdTimer = 0, pinchD = 0;
+
+        const screenToWorld = (sx, sy) => ({ x: (sx - W / 2) / cam.zoom + cam.x, y: (sy - H / 2) / cam.zoom + cam.y });
+        const clampCam = () => {
+          cam.zoom = Math.max(0.35, Math.min(2.5, cam.zoom));
+          cam.x = Math.max(0, Math.min(WORLD_W, cam.x));
+          cam.y = Math.max(0, Math.min(WORLD_H, cam.y));
+        };
+
+        const triggerNight = () => {
+          if (engineRef.current.nightFired) return;
+          engineRef.current.nightFired = true;
+          SoundManager.playMaeh(0.7);
+          onPersistGame({ gameDoneDate: today });
+          setNight(true);
+        };
+
+        const tapAt = (wp) => {
+          const interactive = todayDone;
+          if (!interactive) return;
+          // Tränke?
+          if (wp.x > TROUGH.x - 10 && wp.x < TROUGH.x + TROUGH.w + 10 && wp.y > TROUGH.y - 10 && wp.y < TROUGH.y + TROUGH.h + 20) {
+            onPersistGame({ waterDate: today }); setWaterOk(true); SoundManager.playMaeh(1.3); return;
+          }
+          // Schaf scheren?
+          if (toolRef.current === 'shear') {
+            let best = null, bd = 44;
+            sheep.forEach(s => { if (s.inStall) return; const d = Math.hypot(s.x - wp.x, s.y - wp.y); if (d < bd) { bd = d; best = s; } });
+            if (best) { best.stage = 0; SoundManager.playMaeh(0.9 + Math.random() * 0.5); onPersistGame({ shorn: { [best.id]: today } }); }
+          }
+        };
+
+        const onDown = (e) => {
+          canvas.setPointerCapture && canvas.setPointerCapture(e.pointerId);
+          ptrs.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
+          if (ptrs.size === 2) { const p = [...ptrs.values()]; pinchD = Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y); return; }
+          down = true; moved = false; panning = false; driving = false;
+          sx0 = lastX = e.offsetX; sy0 = lastY = e.offsetY; downTime = performance.now();
+          clearTimeout(holdTimer);
+          holdTimer = setTimeout(() => {
+            if (down && !moved && todayDone) { driving = true; fingerW = screenToWorld(lastX, lastY); }
+          }, 650);
+        };
+        const onMove = (e) => {
+          if (ptrs.has(e.pointerId)) ptrs.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
+          if (ptrs.size === 2) {
+            const p = [...ptrs.values()]; const d = Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+            if (pinchD) { cam.zoom *= d / pinchD; clampCam(); } pinchD = d; return;
+          }
+          if (!down) return;
+          lastX = e.offsetX; lastY = e.offsetY;
+          if (driving) { fingerW = screenToWorld(lastX, lastY); return; }
+          const dx = e.offsetX - sx0, dy = e.offsetY - sy0;
+          if (!moved && Math.hypot(dx, dy) > 8) { moved = true; panning = true; clearTimeout(holdTimer); }
+          if (panning) {
+            const pdx = e.offsetX - (lastPanX ?? e.offsetX), pdy = e.offsetY - (lastPanY ?? e.offsetY);
+            cam.x -= pdx / cam.zoom; cam.y -= pdy / cam.zoom; clampCam();
+          }
+          lastPanX = e.offsetX; lastPanY = e.offsetY;
+        };
+        let lastPanX = null, lastPanY = null;
+        const onUp = (e) => {
+          ptrs.delete(e.pointerId);
+          if (ptrs.size < 2) pinchD = 0;
+          clearTimeout(holdTimer);
+          if (down && !moved && !driving && performance.now() - downTime < 400) tapAt(screenToWorld(e.offsetX, e.offsetY));
+          down = false; driving = false; panning = false; fingerW = null; lastPanX = lastPanY = null;
+        };
+        const onWheel = (e) => { e.preventDefault(); cam.zoom *= e.deltaY < 0 ? 1.1 : 0.9; clampCam(); };
+
+        canvas.addEventListener('pointerdown', onDown);
+        canvas.addEventListener('pointermove', onMove);
+        canvas.addEventListener('pointerup', onUp);
+        canvas.addEventListener('pointercancel', onUp);
+        canvas.addEventListener('wheel', onWheel, { passive: false });
+
+        // ── Zeichnen ──
+        const drawSheep = (s) => {
+          const wool = s.stage / 6, bodyR = 13 + wool * 9;
+          ctx.fillStyle = 'rgba(30,50,20,0.12)';
+          ctx.beginPath(); ctx.ellipse(s.x, s.y + bodyR * 0.75, bodyR * 1.1, bodyR * 0.4, 0, 0, 7); ctx.fill();
+          ctx.strokeStyle = '#8b6f5a'; ctx.lineWidth = 3;
+          [-0.5, 0.5].forEach(o => { ctx.beginPath(); ctx.moveTo(s.x + o * bodyR * 0.6, s.y + bodyR * 0.3); ctx.lineTo(s.x + o * bodyR * 0.6, s.y + bodyR * 0.95); ctx.stroke(); });
+          ctx.fillStyle = wool < 0.2 ? '#f4c9b8' : '#fdfdfd';
+          ctx.beginPath(); ctx.ellipse(s.x, s.y, bodyR, bodyR * 0.85, 0, 0, 7); ctx.fill();
+          if (wool > 0.15) {
+            const puffs = 5 + Math.round(s.stage * 1.6);
+            ctx.fillStyle = '#ffffff';
+            for (let k = 0; k < puffs; k++) {
+              const a = (k / puffs) * Math.PI * 2;
+              ctx.beginPath(); ctx.arc(s.x + Math.cos(a) * bodyR * 0.72, s.y + Math.sin(a) * bodyR * 0.55, bodyR * (0.32 + wool * 0.22), 0, 7); ctx.fill();
+            }
+            ctx.beginPath(); ctx.arc(s.x, s.y - bodyR * 0.1, bodyR * 0.8, 0, 7); ctx.fill();
+          }
+          const hx = s.x + s.face * bodyR * 0.95, hy = s.y - bodyR * 0.08;
+          ctx.fillStyle = '#444b59'; ctx.beginPath(); ctx.ellipse(hx, hy, 7, 8, 0, 0, 7); ctx.fill();
+          ctx.beginPath(); ctx.ellipse(hx - s.face * 5, hy - 5, 3, 4.5, 0, 0, 7); ctx.fill();
+          ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(hx + s.face * 1.5, hy - 1, 1.7, 0, 7); ctx.fill();
+          ctx.fillStyle = '#1f2733'; ctx.beginPath(); ctx.arc(hx + s.face * 2, hy - 1, 0.9, 0, 7); ctx.fill();
+        };
+        const drawTree = (d) => {
+          ctx.fillStyle = '#7a5230'; ctx.fillRect(d.x - 5 * d.s, d.y - 10 * d.s, 10 * d.s, 34 * d.s);
+          ctx.fillStyle = '#3f9a4e'; ctx.beginPath(); ctx.arc(d.x, d.y - 22 * d.s, 26 * d.s, 0, 7); ctx.fill();
+          ctx.fillStyle = '#4cb35e'; ctx.beginPath(); ctx.arc(d.x - 14 * d.s, d.y - 14 * d.s, 18 * d.s, 0, 7); ctx.fill();
+          ctx.beginPath(); ctx.arc(d.x + 15 * d.s, d.y - 16 * d.s, 17 * d.s, 0, 7); ctx.fill();
+        };
+        const drawBarn = (big) => {
+          const w = big ? 200 : 140, h = big ? 130 : 96;
+          const x = BARN.x - w / 2, y = BARN.y - h / 2;
+          ctx.fillStyle = '#b9533f'; ctx.fillRect(x, y + h * 0.32, w, h * 0.68);
+          ctx.fillStyle = '#8c3c2d'; ctx.beginPath(); ctx.moveTo(x - 10, y + h * 0.34); ctx.lineTo(BARN.x, y - 8); ctx.lineTo(x + w + 10, y + h * 0.34); ctx.closePath(); ctx.fill();
+          ctx.fillStyle = '#5e2a20'; ctx.fillRect(BARN.x - w * 0.16, y + h * 0.52, w * 0.32, h * 0.48);
+        };
+        const drawTrough = (filled) => {
+          ctx.fillStyle = '#7a5230'; ctx.fillRect(TROUGH.x, TROUGH.y, TROUGH.w, TROUGH.h);
+          ctx.fillStyle = filled ? '#4aa3df' : '#5e4a36';
+          ctx.fillRect(TROUGH.x + 5, TROUGH.y + (filled ? 6 : 18), TROUGH.w - 10, TROUGH.h - (filled ? 11 : 22));
+        };
+
+        let last = performance.now();
+        const loop = (now) => {
+          const dt = Math.min(40, now - last) / 16.67; last = now;
+          // Update
+          let activeCount = 0;
+          sheep.forEach(s => {
+            if (s.inStall) return;
+            activeCount++;
+            s.t += dt * 0.04;
+            if (driving && fingerW) {
+              const dx = s.x - fingerW.x, dy = s.y - fingerW.y, dd = Math.hypot(dx, dy);
+              if (dd < 230) { const f = (230 - dd) / 230 * 2.4; s.vx += (dx / (dd || 1)) * f; s.vy += (dy / (dd || 1)) * f; s.face = dx < 0 ? -1 : 1; }
+            } else {
+              s.nextMove -= dt * 0.016;
+              if (s.nextMove <= 0) { s.nextMove = 2 + Math.random() * 4; s.vx += (Math.random() - 0.5) * 1.2; s.vy += (Math.random() - 0.5) * 1.0; s.face = s.vx < 0 ? -1 : 1; }
+              s.vx += (s.hx - s.x) * 0.0006; s.vy += (s.hy - s.y) * 0.0006;
+            }
+            s.x += s.vx * dt; s.y += s.vy * dt; s.vx *= 0.9; s.vy *= 0.9;
+            s.x = Math.max(60, Math.min(WORLD_W - 60, s.x)); s.y = Math.max(150, Math.min(WORLD_H - 50, s.y));
+            // Großzügige Fangzone rund um den Stall (oben-links), damit das Eintreiben machbar ist
+            if (todayDone && s.x < BARN.x + 120 && s.y < BARN.y + 140) { s.inStall = true; SoundManager.playMaeh(0.8 + Math.random() * 0.5); }
+          });
+          if (todayDone && visible > 0 && activeCount === 0) { setAllIn(true); triggerNight(); }
+
+          // Render
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          ctx.clearRect(0, 0, W, H);
+          const g = ctx.createLinearGradient(0, 0, 0, H);
+          g.addColorStop(0, '#a7e08a'); g.addColorStop(1, '#7cc865'); ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+          ctx.save();
+          ctx.translate(W / 2, H / 2); ctx.scale(cam.zoom, cam.zoom); ctx.translate(-cam.x, -cam.y);
+          // Teich
+          ctx.fillStyle = '#5bb0e0'; ctx.beginPath(); ctx.ellipse(pond.x, pond.y, pond.rx, pond.ry, 0, 0, 7); ctx.fill();
+          ctx.fillStyle = '#7cc3ea'; ctx.beginPath(); ctx.ellipse(pond.x, pond.y - 10, pond.rx * 0.8, pond.ry * 0.7, 0, 0, 7); ctx.fill();
+          drawBarn(streak.current > 500);
+          drawTrough(waterOk);
+          // Deko + Schafe nach y sortiert
+          const drawables = [...deco.map(d => ({ y: d.y, f: () => d.t === 'tree' ? drawTree(d) : (ctx.fillStyle = '#9aa3ad', ctx.beginPath(), ctx.ellipse(d.x, d.y, 9 * d.s, 6 * d.s, 0, 0, 7), ctx.fill()) })),
+                             ...sheep.filter(s => !s.inStall).map(s => ({ y: s.y, f: () => drawSheep(s) }))];
+          drawables.sort((a, b) => a.y - b.y).forEach(d => d.f());
+          ctx.restore();
+          raf = requestAnimationFrame(loop);
+        };
+        raf = requestAnimationFrame(loop);
+        engineRef.current = {
+          nightFired: doneToday,
+          zoomBy: (f) => { cam.zoom *= f; clampCam(); },
+          recenter: () => { cam.x = WORLD_W / 2; cam.y = WORLD_H / 2; cam.zoom = 0.6; },
+        };
+
+        return () => {
+          cancelAnimationFrame(raf); ro.disconnect();
+          canvas.removeEventListener('pointerdown', onDown);
+          canvas.removeEventListener('pointermove', onMove);
+          canvas.removeEventListener('pointerup', onUp);
+          canvas.removeEventListener('pointercancel', onUp);
+          canvas.removeEventListener('wheel', onWheel);
+        };
+      }, [visible, todayDone]);
 
       return (
-        <div className="flex flex-col bg-green-100" style={{ minHeight: '100dvh' }}>
-          <div className="bg-white px-4 py-4 shadow-sm flex items-center gap-3 flex-none">
+        <div className="flex flex-col bg-green-100" style={{ height: '100dvh' }}>
+          <div className="bg-white px-4 py-3 shadow-sm flex items-center gap-3 flex-none z-10">
             <button onClick={onBack} className="text-green-600 text-lg px-1">←</button>
-            <h1 className="text-xl font-bold text-gray-800">🌿 Schafwiese</h1>
+            <h1 className="text-lg font-bold text-gray-800">🌿 Schafwiese</h1>
             <span className="ml-auto text-sm text-green-700 font-semibold bg-green-100 px-3 py-1 rounded-full">
-              {streak.current} Schaf{streak.current !== 1 ? 'e' : ''}
+              {streak.current} 🐑{inStallCount > 0 ? ` (+${inStallCount} im Stall)` : ''}
             </span>
           </div>
 
-          <div className="flex-1 flex flex-col items-center justify-center gap-4 px-6 text-center overflow-y-auto py-6">
-            {visible === 0 ? (
-              <>
+          <div ref={wrapRef} className="relative flex-1 overflow-hidden touch-none select-none">
+            <canvas ref={canvasRef} className="absolute inset-0 block" style={{ touchAction: 'none' }} />
+
+            {visible === 0 && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-6 pointer-events-none">
                 <span className="text-5xl">🌱</span>
-                <p className="text-gray-500 font-medium">Die Wiese ist noch leer.</p>
-                <p className="text-sm text-gray-400">Beantworte deine erste Abfrage!</p>
-              </>
-            ) : (
-              <>
-                <div className="flex flex-wrap justify-center gap-3">
-                  {Array.from({ length: visible }).map((_, i) => (
-                    <SheepSVG
-                      key={i}
-                      size={55}
-                      className="anim-float"
-                      style={{ animationDelay: `${(i * 0.37) % 3}s` }}
-                    />
-                  ))}
-                </div>
-                {streak.current > 12 && (
-                  <p className="text-green-600 font-medium text-sm">…und {streak.current - 12} weitere im Stall 🏠</p>
-                )}
-              </>
+                <p className="text-green-800 font-medium mt-2">Die Wiese ist noch leer.</p>
+                <p className="text-sm text-green-700/70">Beantworte deine erste Abfrage!</p>
+              </div>
             )}
-            <p className="text-xs text-gray-400 mt-4 bg-white rounded-2xl px-4 py-2 shadow-sm">
-              🌱 Die interaktive Wiese mit Drag & Zoom kommt in Phase 5
-            </p>
+
+            {/* Hinweis */}
+            {visible > 0 && !night && (
+              <div className="absolute top-3 left-1/2 -translate-x-1/2 bg-white/85 rounded-full px-4 py-1.5 text-xs text-gray-600 shadow-sm pointer-events-none max-w-[90%] text-center">
+                {!todayDone
+                  ? '👀 Nur ansehen – beantworte erst die Fragen, um die Wiese zu pflegen.'
+                  : doneToday
+                    ? '🌙 Alle Schafe schlafen schon – schau dich ruhig um.'
+                    : (tool === 'shear' ? '✂️ Tippe ein Schaf an, um es zu scheren.' : '✋ Zur Belohnung: halte gedrückt, um Schafe in den Stall zu treiben.')}
+              </div>
+            )}
+
+            {/* Zoom-Buttons */}
+            <div className="absolute right-3 bottom-24 flex flex-col gap-2">
+              {['+', '−', '⟳'].map((sym, i) => (
+                <button key={sym}
+                  onClick={() => { const e = engineRef.current; if (!e) return; if (i === 0) e.zoomBy(1.25); else if (i === 1) e.zoomBy(0.8); else e.recenter(); }}
+                  className="w-11 h-11 rounded-full bg-white shadow text-gray-700 text-xl font-bold active:scale-90">
+                  {sym}
+                </button>
+              ))}
+            </div>
+
+            {/* Toolbar (nur interaktiv) */}
+            {todayDone && visible > 0 && !night && (
+              <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-3 bg-white/90 rounded-2xl px-3 py-2 shadow">
+                <button onClick={() => setTool(t => t === 'shear' ? 'none' : 'shear')}
+                  className={`px-4 py-2 rounded-xl text-sm font-semibold ${tool === 'shear' ? 'bg-green-600 text-white' : 'bg-gray-100 text-gray-700'}`}>
+                  ✂️ Scheren
+                </button>
+                <div className={`px-4 py-2 rounded-xl text-sm font-semibold ${waterOk ? 'bg-blue-100 text-blue-600' : 'bg-amber-100 text-amber-700'}`}>
+                  {waterOk ? '💧 Tränke voll' : '💧 Tränke leer'}
+                </div>
+              </div>
+            )}
+
+            {/* Nacht-Overlay */}
+            {night && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-6 anim-fadeIn"
+                style={{ background: 'radial-gradient(circle at 50% 40%, rgba(30,41,79,0.85), rgba(10,12,30,0.96))' }}>
+                <div className="text-6xl mb-3">🌙</div>
+                <h2 className="text-2xl font-bold text-white mb-1">Gute Nacht!</h2>
+                <p className="text-indigo-200 text-sm mb-8 max-w-xs">Alle Schafe sind im Stall. Sie schlafen – und du darfst das auch. 💤</p>
+                <Btn variant="primary" onClick={onBack} className="w-full max-w-xs">Schließen</Btn>
+              </div>
+            )}
           </div>
         </div>
       );
@@ -1933,6 +2215,15 @@
         await saveData(updated);
       };
 
+      const handleGamePersist = async (patch) => {
+        const updated = {
+          ...data,
+          game: { ...data.game, ...patch, shorn: { ...data.game.shorn, ...(patch.shorn || {}) } },
+        };
+        setData(updated);
+        await saveData(updated);
+      };
+
       const handleSaveSettings = async (newSettings) => {
         const updated = { ...data, settings: newSettings };
         setData(updated);
@@ -1991,7 +2282,7 @@
       }
 
       if (screen === 'meadow') {
-        return <MeadowScreen streak={data.streak} onBack={() => setScreen('start')} />;
+        return <MeadowScreen streak={data.streak} game={data.game} todayDone={todayDone} onPersistGame={handleGamePersist} onBack={() => setScreen('start')} />;
       }
 
       if (screen === 'stats') {

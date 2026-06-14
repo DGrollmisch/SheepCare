@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sheepcare-v4';
+const CACHE_NAME = 'sheepcare-v5';
 
 const URLS_TO_CACHE = [
   './',
