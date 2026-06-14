@@ -1,0 +1,10 @@
+# Wrangler – lokaler Zustand, Cache & Logs (enthält lokale KV-Simulation, nie committen)
+.wrangler/
+worker/.wrangler/
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
