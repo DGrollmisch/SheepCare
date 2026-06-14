@@ -64,6 +64,13 @@
     .anim-slideUp   { animation: slideUp 0.35s ease-out; }
     .anim-fadeIn    { animation: fadeIn 0.4s ease; }
     .anim-runOff    { animation: runOff 1.2s ease-in forwards; }
+
+    /* Accessibility: dekorative Animationen bei Reduced-Motion abschalten
+       (das Spiel-Canvas ist interaktiver Inhalt und bleibt unberührt) */
+    @media (prefers-reduced-motion: reduce) {
+      .anim-bounceIn, .anim-float, .anim-wiggle,
+      .anim-slideUp, .anim-fadeIn, .anim-runOff { animation: none !important; }
+    }
   </style>
 </head>
 <body>
@@ -371,6 +378,7 @@
       streak: { current: 0, best: 0, lastCompletedDate: null },
       dailyMotivation: { date: null, text: '' },
       game: { waterDate: null, gameDoneDate: null, shorn: {} },
+      onboarded: false,
       settings: {
         soundEnabled: true,
         push20Enabled: true,
@@ -392,6 +400,8 @@
         streak:   { ...DEFAULT_DATA().streak,   ...(raw.streak   || {}) },
         dailyMotivation: { ...DEFAULT_DATA().dailyMotivation, ...(raw.dailyMotivation || {}) },
         game:     { ...DEFAULT_DATA().game, ...(raw.game || {}), shorn: { ...(raw.game && raw.game.shorn || {}) } },
+        // Bestehende Nutzer mit Daten haben das Onboarding effektiv schon hinter sich
+        onboarded: raw.onboarded === true || Object.keys(raw.entries || {}).length > 0,
         settings: { ...DEFAULT_DATA().settings, ...(raw.settings || {}) },
       };
 
@@ -853,7 +863,7 @@
       };
 
       const handleNext = () => {
-        if (!canGoNext()) return;
+        // Überspringen erlaubt (zählt nicht als Lauf – endgültig Speichern bleibt gegated)
         if (clampedIndex < getActiveSteps(answers).length - 1) {
           setStepIndex(clampedIndex + 1);
         }
@@ -982,12 +992,12 @@
                 ← Zurück
               </Btn>
               <Btn
-                variant={canGoNext() ? 'primary' : 'ghost'}
+                variant={canGoNext() ? 'primary' : 'secondary'}
                 onClick={handleNext}
-                disabled={!canGoNext() || isLast}
+                disabled={isLast}
                 className="flex-1 py-3"
               >
-                {isLast ? '✓ Letzte Frage' : 'Weiter →'}
+                {isLast ? '✓ Letzte Frage' : (canGoNext() ? 'Weiter →' : 'Überspringen →')}
               </Btn>
             </div>
           </div>
@@ -1158,6 +1168,10 @@
           });
         }
 
+        // Stall-Überlauf: temporär „rausgelassene" Schafe (rein visuell, >50)
+        const released = [];
+        let releaseTimer = 0;
+
         // Eingabe-Status
         const ptrs = new Map();
         let down = false, sx0 = 0, sy0 = 0, lastX = 0, lastY = 0, moved = false, panning = false, downTime = 0;
@@ -1179,8 +1193,29 @@
         };
 
         const tapAt = (wp) => {
-          const interactive = todayDone;
-          if (!interactive) return;
+          // Stall antippen → Überlauf-Schafe rauslassen / zurückschicken (auch read-only)
+          if (streak.current > 50) {
+            const bw = streak.current > 500 ? 200 : 140, bh = streak.current > 500 ? 130 : 96;
+            if (wp.x > BARN.x - bw / 2 && wp.x < BARN.x + bw / 2 && wp.y > BARN.y - bh / 2 && wp.y < BARN.y + bh) {
+              if (released.length) { released.length = 0; clearTimeout(releaseTimer); }
+              else {
+                const n = Math.min(40, streak.current - 50);
+                for (let k = 0; k < n; k++) {
+                  released.push({
+                    x: BARN_DOOR.x + (Math.random() - 0.5) * 40, y: BARN_DOOR.y + 30 + Math.random() * 30,
+                    vx: (Math.random() - 0.5) * 3, vy: 1.5 + Math.random() * 2, nextMove: Math.random() * 3,
+                    hx: 200 + Math.random() * (WORLD_W - 400), hy: BARN_DOOR.y + 140 + Math.random() * (WORLD_H - BARN_DOOR.y - 240),
+                    face: 1, stage: 2 + Math.floor(Math.random() * 4), inStall: false,
+                  });
+                }
+                SoundManager.playMaeh(1.1);
+                clearTimeout(releaseTimer);
+                releaseTimer = setTimeout(() => { released.length = 0; }, 120000);
+              }
+              return;
+            }
+          }
+          if (!todayDone) return;
           // Tränke?
           if (wp.x > TROUGH.x - 10 && wp.x < TROUGH.x + TROUGH.w + 10 && wp.y > TROUGH.y - 10 && wp.y < TROUGH.y + TROUGH.h + 20) {
             onPersistGame({ waterDate: today }); setWaterOk(true); SoundManager.playMaeh(1.3); return;
@@ -1304,6 +1339,15 @@
           });
           if (todayDone && visible > 0 && activeCount === 0) { setAllIn(true); triggerNight(); }
 
+          // Rausgelassene Überlauf-Schafe wandern (rein visuell, kehren per Timeout zurück)
+          released.forEach(s => {
+            s.nextMove -= dt * 0.016;
+            if (s.nextMove <= 0) { s.nextMove = 2 + Math.random() * 4; s.vx += (Math.random() - 0.5) * 1.4; s.vy += (Math.random() - 0.5) * 1.2; s.face = s.vx < 0 ? -1 : 1; }
+            s.vx += (s.hx - s.x) * 0.0007; s.vy += (s.hy - s.y) * 0.0007;
+            s.x += s.vx * dt; s.y += s.vy * dt; s.vx *= 0.9; s.vy *= 0.9;
+            s.x = Math.max(60, Math.min(WORLD_W - 60, s.x)); s.y = Math.max(150, Math.min(WORLD_H - 50, s.y));
+          });
+
           // Render
           ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
           ctx.clearRect(0, 0, W, H);
@@ -1318,7 +1362,8 @@
           drawTrough(waterOk);
           // Deko + Schafe nach y sortiert
           const drawables = [...deco.map(d => ({ y: d.y, f: () => d.t === 'tree' ? drawTree(d) : (ctx.fillStyle = '#9aa3ad', ctx.beginPath(), ctx.ellipse(d.x, d.y, 9 * d.s, 6 * d.s, 0, 0, 7), ctx.fill()) })),
-                             ...sheep.filter(s => !s.inStall).map(s => ({ y: s.y, f: () => drawSheep(s) }))];
+                             ...sheep.filter(s => !s.inStall).map(s => ({ y: s.y, f: () => drawSheep(s) })),
+                             ...released.map(s => ({ y: s.y, f: () => drawSheep(s) }))];
           drawables.sort((a, b) => a.y - b.y).forEach(d => d.f());
           ctx.restore();
           raf = requestAnimationFrame(loop);
@@ -1331,7 +1376,7 @@
         };
 
         return () => {
-          cancelAnimationFrame(raf); ro.disconnect();
+          cancelAnimationFrame(raf); ro.disconnect(); clearTimeout(holdTimer); clearTimeout(releaseTimer);
           canvas.removeEventListener('pointerdown', onDown);
           canvas.removeEventListener('pointermove', onMove);
           canvas.removeEventListener('pointerup', onUp);
@@ -1995,6 +2040,22 @@
       );
     };
 
+    // ── Onboarding (erster Start) ───────────────────────────────────────────
+    const OnboardingModal = ({ onDone }) => (
+      <div className="fixed inset-0 z-50 flex items-center justify-center px-6 bg-black/50 anim-fadeIn">
+        <div className="bg-white rounded-3xl p-6 max-w-sm w-full shadow-xl anim-slideUp">
+          <div className="text-5xl text-center mb-3">🐑</div>
+          <h2 className="text-xl font-bold text-gray-800 text-center mb-4">Willkommen bei SheepCare!</h2>
+          <ul className="text-sm text-gray-600 space-y-3 mb-6">
+            <li className="flex gap-2.5"><span className="text-lg leading-none">📲</span><span><b>Zum Startbildschirm hinzufügen</b> (Browser-Menü → „Zum Startbildschirm") – dann läuft SheepCare wie eine echte App.</span></li>
+            <li className="flex gap-2.5"><span className="text-lg leading-none">🔒</span><span>Deine Antworten bleiben <b>nur auf diesem Gerät</b>.</span></li>
+            <li className="flex gap-2.5"><span className="text-lg leading-none">💾</span><span>Mach in den Einstellungen ab und zu einen <b>Export</b> als Backup – so gehen keine Daten verloren.</span></li>
+          </ul>
+          <Btn variant="primary" onClick={onDone} className="w-full">Auf geht's! 🌿</Btn>
+        </div>
+      </div>
+    );
+
     // ── Start Screen ────────────────────────────────────────────────────────
     const StartScreen = ({ data, streak, motivation, todayDone, todayDraft, onStart, onNavigate }) => {
       const status = todayDone ? 'C' : streak.current > 0 ? 'A' : 'B';
@@ -2215,6 +2276,12 @@
         await saveData(updated);
       };
 
+      const handleOnboarded = async () => {
+        const updated = { ...data, onboarded: true };
+        setData(updated);
+        await saveData(updated);
+      };
+
       const handleGamePersist = async (patch) => {
         const updated = {
           ...data,
@@ -2290,15 +2357,18 @@
       }
 
       return (
-        <StartScreen
-          data={data}
-          streak={data.streak}
-          motivation={motivation}
-          todayDone={todayDone}
-          todayDraft={todayDraft}
-          onStart={() => setScreen('questionnaire')}
-          onNavigate={setScreen}
-        />
+        <>
+          <StartScreen
+            data={data}
+            streak={data.streak}
+            motivation={motivation}
+            todayDone={todayDone}
+            todayDraft={todayDraft}
+            onStart={() => setScreen('questionnaire')}
+            onNavigate={setScreen}
+          />
+          {!data.onboarded && <OnboardingModal onDone={handleOnboarded} />}
+        </>
       );
     }
 
