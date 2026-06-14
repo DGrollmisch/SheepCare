@@ -522,9 +522,9 @@
 
     // ── Push-Benachrichtigungen (Web Push via Cloudflare Worker) ─────────────
     // Diese drei Werte nach dem Worker-Deploy ausfüllen (siehe worker/README.md):
-    const VAPID_PUBLIC_KEY = '';            // öffentlicher VAPID-Key (Base64URL)
-    const PUSH_WORKER_URL  = '';            // z.B. 'https://sheepcare-push.<name>.workers.dev'
-    const PUSH_TOKEN       = 'CHANGE_ME';   // Shared Secret, identisch im Worker
+    const VAPID_PUBLIC_KEY = 'BLZdEtNJXPOj_XEDFRufQgdmsdvAd6GQ7l-CyGCWuTj-HSjLoO9wl6APbfO6qJST7mWKcBzu_PEWfYD7U8kRz6s';
+    const PUSH_WORKER_URL  = 'https://sheepcare-push.mr-blue90.workers.dev';
+    const PUSH_TOKEN       = '7187d770d8adc354417dd8ef167a3d97';
 
     const pushConfigured = () => !!(VAPID_PUBLIC_KEY && PUSH_WORKER_URL);
 

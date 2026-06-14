@@ -11,15 +11,15 @@ crons = ["*/15 * * * *"]
 # ID nach `wrangler kv namespace create SUBS` hier eintragen:
 [[kv_namespaces]]
 binding = "SUBS"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "67719a9785df42fa9ee175e280c2e96d"
 
 [vars]
 # Öffentlicher VAPID-Key (darf öffentlich sein) – identisch zu VAPID_PUBLIC_KEY in index.html
-VAPID_PUBLIC_KEY = "REPLACE_WITH_VAPID_PUBLIC_KEY"
+VAPID_PUBLIC_KEY = "BLZdEtNJXPOj_XEDFRufQgdmsdvAd6GQ7l-CyGCWuTj-HSjLoO9wl6APbfO6qJST7mWKcBzu_PEWfYD7U8kRz6s"
 VAPID_SUBJECT    = "mailto:mr.blue90@gmx.net"
 # Shared Secret – identisch zu PUSH_TOKEN in index.html. Schützt nur gegen
-# willkürliches Registrieren; bitte auf einen eigenen Wert ändern.
-PUSH_TOKEN       = "CHANGE_ME"
+# willkürliches Registrieren.
+PUSH_TOKEN       = "7187d770d8adc354417dd8ef167a3d97"
 
 # VAPID_PRIVATE_KEY wird NICHT hier abgelegt, sondern als Secret:
 #   wrangler secret put VAPID_PRIVATE_KEY
