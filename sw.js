@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sheepcare-v6';
+const CACHE_NAME = 'sheepcare-v7';
 
 const URLS_TO_CACHE = [
   './',
@@ -6,6 +6,7 @@ const URLS_TO_CACHE = [
   './manifest.json',
   './icon-192.png',
   './icon-512.png',
+  './badge.png',
 ];
 
 self.addEventListener('install', (e) => {
@@ -66,7 +67,7 @@ self.addEventListener('push', (e) => {
     self.registration.showNotification(title, {
       body,
       icon: './icon-192.png',
-      badge: './icon-192.png',
+      badge: './badge.png',
       vibrate: [100, 50, 100],
       tag: 'sheepcare-reminder',
       renotify: true,
