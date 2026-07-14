@@ -770,46 +770,51 @@
       />
     );
 
-    // Einheitliche Dauer-Stufen (Minuten): fein bei kurzen, grob bei langen Zeiten,
-    // bis „Ganzer Tag". Wird überall verwendet, wo eine Zeitdauer eingegeben wird.
-    const DURATION_STEPS = [5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240, 360, 480, 720, 1440];
+    // Einheitliche Dauer-Anzeige (Stunden/Minuten wie in einer Timer-App, max. 24 Std).
+    // Wird überall verwendet, wo eine Zeitdauer eingegeben wird. Wert in Stunden gespeichert.
     const fmtDuration = (min) => {
       if (min >= 1440) return 'Ganzer Tag';
-      if (min < 60) return `${min} Min`;
       const h = Math.floor(min / 60), m = min % 60;
-      return m === 0 ? `${h} Std` : `${h}:${String(m).padStart(2, '0')} Std`;
-    };
-    const durationNearestIdx = (hours) => {
-      const min = Math.round((hours || 0) * 60);
-      let bi = 0, bd = Infinity;
-      DURATION_STEPS.forEach((s, i) => { const d = Math.abs(s - min); if (d < bd) { bd = d; bi = i; } });
-      return bi;
+      if (h === 0) return `${m} Min`;
+      if (m === 0) return `${h} Std`;
+      return `${h} Std ${m} Min`;
     };
 
     const DurationInput = ({ value, onChange }) => {
       const hasVal = value !== null && value !== undefined;
-      const DEFAULT_IDX = 4; // 30 Min
-      const idx = hasVal ? durationNearestIdx(value) : DEFAULT_IDX;
-      const set = (i) => onChange(DURATION_STEPS[i] / 60); // gespeichert in Stunden
+      const total = hasVal ? Math.min(1440, Math.round(value * 60)) : 0;
+      const h = Math.floor(total / 60), m = total % 60;
+      const emit = (nh, nm) => {
+        const mm = nh >= 24 ? 0 : nm;          // Deckel bei 24:00 (Ganzer Tag)
+        onChange((nh * 60 + mm) / 60);          // in Stunden
+      };
+      const range = (n) => Array.from({ length: n }, (_, i) => i);
+      const selCls = "w-full text-center text-2xl font-bold text-green-700 bg-white border-2 border-gray-200 rounded-2xl py-3 focus:border-green-400 focus:outline-none";
 
       return (
-        <div className="w-full px-1">
-          <div className={`text-center text-4xl font-bold py-3 mb-2 ${hasVal ? 'text-green-700' : 'text-gray-300'}`}>
-            {fmtDuration(DURATION_STEPS[idx])}
+        <div className="w-full">
+          <div className={`text-center text-3xl font-bold py-3 mb-4 ${hasVal ? 'text-green-700' : 'text-gray-300'}`}>
+            {hasVal ? fmtDuration(total) : '– – –'}
           </div>
-          <input
-            type="range" min="0" max={DURATION_STEPS.length - 1} step="1" value={idx}
-            onChange={(e) => set(+e.target.value)}
-            onPointerDown={() => { if (!hasVal) set(DEFAULT_IDX); }}
-            className="w-full h-3 accent-green-600 cursor-pointer"
-          />
-          <div className="flex justify-between text-xs text-gray-400 mt-2 px-0.5">
-            <span>5 Min</span>
-            <span>1 Std</span>
-            <span>Ganzer Tag</span>
+          <div className="flex items-end gap-3">
+            <div className="flex-1">
+              <select value={hasVal ? h : ''} onChange={(e) => emit(+e.target.value, hasVal ? m : 0)} className={selCls}>
+                {!hasVal && <option value="" disabled>–</option>}
+                {range(25).map(n => <option key={n} value={n}>{n}</option>)}
+              </select>
+              <p className="text-center text-xs text-gray-400 mt-1.5">Stunden</p>
+            </div>
+            <span className="text-3xl font-bold text-gray-300 pb-9">:</span>
+            <div className="flex-1">
+              <select value={hasVal ? m : ''} onChange={(e) => emit(hasVal ? h : 0, +e.target.value)} disabled={hasVal && h >= 24} className={`${selCls} ${hasVal && h >= 24 ? 'opacity-40' : ''}`}>
+                {!hasVal && <option value="" disabled>–</option>}
+                {range(60).map(n => <option key={n} value={n}>{String(n).padStart(2, '0')}</option>)}
+              </select>
+              <p className="text-center text-xs text-gray-400 mt-1.5">Minuten</p>
+            </div>
           </div>
           {!hasVal && (
-            <p className="text-center text-sm text-gray-400 mt-5">🎚️ Schieb den Regler, um deine Zeit einzutragen</p>
+            <p className="text-center text-sm text-gray-400 mt-5">Wähle Stunden und Minuten (max. 24 Std)</p>
           )}
         </div>
       );
