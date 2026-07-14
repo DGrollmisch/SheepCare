@@ -770,34 +770,47 @@
       />
     );
 
+    // Einheitliche Dauer-Stufen (Minuten): fein bei kurzen, grob bei langen Zeiten,
+    // bis „Ganzer Tag". Wird überall verwendet, wo eine Zeitdauer eingegeben wird.
+    const DURATION_STEPS = [5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240, 360, 480, 720, 1440];
+    const fmtDuration = (min) => {
+      if (min >= 1440) return 'Ganzer Tag';
+      if (min < 60) return `${min} Min`;
+      const h = Math.floor(min / 60), m = min % 60;
+      return m === 0 ? `${h} Std` : `${h}:${String(m).padStart(2, '0')} Std`;
+    };
+    const durationNearestIdx = (hours) => {
+      const min = Math.round((hours || 0) * 60);
+      let bi = 0, bd = Infinity;
+      DURATION_STEPS.forEach((s, i) => { const d = Math.abs(s - min); if (d < bd) { bd = d; bi = i; } });
+      return bi;
+    };
+
     const DurationInput = ({ value, onChange }) => {
-      const fmt = (h) => {
-        const hrs  = Math.floor(h);
-        const mins = Math.round((h - hrs) * 60);
-        if (hrs === 0) return `${mins} Min`;
-        if (mins === 0) return `${hrs} Std`;
-        return `${hrs}:${String(mins).padStart(2, '0')} Std`;
-      };
-      const opts = [];
-      for (let v = 0.25; v <= 8; v += 0.25) opts.push(v);
+      const hasVal = value !== null && value !== undefined;
+      const DEFAULT_IDX = 4; // 30 Min
+      const idx = hasVal ? durationNearestIdx(value) : DEFAULT_IDX;
+      const set = (i) => onChange(DURATION_STEPS[i] / 60); // gespeichert in Stunden
 
       return (
-        <div className="w-full">
-          <div className="text-center text-4xl font-bold text-green-700 py-3 mb-3">
-            {value ? fmt(value) : '—'}
+        <div className="w-full px-1">
+          <div className={`text-center text-4xl font-bold py-3 mb-2 ${hasVal ? 'text-green-700' : 'text-gray-300'}`}>
+            {fmtDuration(DURATION_STEPS[idx])}
           </div>
-          <div className="flex flex-wrap gap-2 justify-center overflow-y-auto max-h-52 pb-2">
-            {opts.map(opt => (
-              <button
-                key={opt}
-                onClick={() => onChange(opt)}
-                className={`px-3 py-2 rounded-xl border text-sm font-medium transition-all active:scale-95 min-w-[4rem]
-                  ${value === opt ? 'border-green-500 bg-green-500 text-white' : 'border-gray-200 bg-white text-gray-600'}`}
-              >
-                {fmt(opt)}
-              </button>
-            ))}
+          <input
+            type="range" min="0" max={DURATION_STEPS.length - 1} step="1" value={idx}
+            onChange={(e) => set(+e.target.value)}
+            onPointerDown={() => { if (!hasVal) set(DEFAULT_IDX); }}
+            className="w-full h-3 accent-green-600 cursor-pointer"
+          />
+          <div className="flex justify-between text-xs text-gray-400 mt-2 px-0.5">
+            <span>5 Min</span>
+            <span>1 Std</span>
+            <span>Ganzer Tag</span>
           </div>
+          {!hasVal && (
+            <p className="text-center text-sm text-gray-400 mt-5">🎚️ Schieb den Regler, um deine Zeit einzutragen</p>
+          )}
         </div>
       );
     };
